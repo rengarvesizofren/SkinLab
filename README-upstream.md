@@ -1,0 +1,148 @@
+
+## About cslol-go
+
+**cslol-go** is a **League of Legends mod manager** designed for best possible user expirience. Built as an alternative to the original [**cslol-manager**](https://github.com/LeagueToolkit/cslol-manager) and the current [**ltk-manager**](https://github.com/LeagueToolkit/ltk-manager), it provides a interface similar to og cslol-manager, but with significant Quality of Life (QoL) improvements.
+
+<p align="center">
+  <a href="#">
+    <img src="https://github.com/Aurecueil/Temp/blob/main/images/cslolgo_0.2.2.png?raw=true" width="800" >
+  </a>
+</p>
+
+## Features
+- Customizable UI
+- Mod Folders
+- Batch operations
+- Random mod selection
+- [Runeforge](https://www.runeforge.dev/) one-click downloads
+- [Modpkg](https://github.com/LeagueToolkit/league-mod) import/export
+- [BIN delta modpkg support](docs/bin-deltas.md) (reimport packages installed by older versions)
+- Flexible importing
+- Best mod fixer
+- Mod thumbnails
+- Instant profiles
+
+<h1>
+  Installation
+  <a href="https://www.youtube.com/watch?v=z3xMxmOcD9w" align="right">
+    <img src="https://img.shields.io/badge/YouTube-Watch_Video_Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=18181b" alt="Watch Tutorial on YouTube" valign="middle" />
+  </a>
+</h1>
+
+<table align="center">
+  <tr>
+    <td>
+      <p> 
+        
+1. Download: [cslol-go.zip](https://github.com/Aurecueil/Cs-lol-go/releases/latest/download/cslol-go.zip)
+2. Extract: `cslol-go.zip`
+3. Run `ModLoader.exe`
+
+      </p>
+    </td>
+    <td>
+      <a href="#installation">
+        <img src="https://github.com/Aurecueil/Temp/blob/main/images/exe1.png?raw=true" width="520">
+      </a>
+    </td>
+  </tr>
+</table>
+
+
+# Updates
+cslol-go automatically checks for the latest version when you open the app. If there is a newer version, the app will display a message box.
+
+To update: download the latest release from GitHub and extract it to the same location (overwriting existing files).
+
+# Usage
+## Mod Tiles
+<p align="center">
+  <a href="#mod-tiles">
+    <img src="https://github.com/Aurecueil/Temp/blob/main/images/modtile.png"/>
+  </a>
+</p>
+
+To enable a mod, check its checkmark on the left.
+
+The buttons on a mod tile are as follows (left to right):
+1. 🔧Topaz mod fixer
+1. 📄Export
+1. ✏️Edit
+1. ❌Delete
+
+<h1>
+  Topaz Mod Fixer
+  <a href="https://www.youtube.com/watch?v=kFsdUW3-mqU" align="right">
+    <img src="https://img.shields.io/badge/YouTube-Watch_Video_Tutorial-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=18181b" alt="Watch Tutorial on YouTube" valign="middle" />
+  </a>
+</h1>
+<table align="center">
+  <tr>
+    <td align="center">
+      <a href="#topaz-mod-fixer">
+        <img src="https://github.com/Aurecueil/Temp/blob/main/images/fixer_menu.png?raw=true" height="600" alt="Fixer Menu" />
+      </a>
+    </td>
+    <td align="center">
+      <a href="#topaz-mod-fixer">
+        <img src="https://github.com/Aurecueil/Temp/blob/main/images/fixer_log.png?raw=true" height="600" alt="Fixer Log" />
+      </a>
+    </td>
+  </tr>
+</table>
+
+> [!IMPORTANT]
+> Fixer will attempt to autofill settings, but remember to check if both character and skin number are correct
+
+Current features of Topaz Mod Fixer:
+- Repath
+- Fix outdated path
+- Fix HP bar style
+- Delete Unused definitions and assets
+- Fix VO events.bnk with newest version and correct language
+- Creates Backup of the mod, in case things go south
+
+Opotional features:
+- Manifest (use older game files to fill in stuff missing in newer versions)
+- No-skin (Apply to all skins)
+- Binless (output mod without .bin files)
+- Kill static materials (disabled static materials, as outdated ones can crash the game)
+
+## Search
+Filter your installed mods. You can use the following flags to better filter search results.
+
+> [!IMPORTANT]
+> These flags **must** be at the very start of the search query.
+
+- `-g` (global) to show ALL installed mods
+- `-f` (flat) to show ALL mods for current mods (lol/tft)
+- `-l` (local) to show all mods in current folder and subfolders (recursive)
+
+### Other search options
+
+> [!TIP]
+> These keywords can be *anywhere* in the search query, and can be partial (`author:` / `auth:` / `a:`)
+
+- `name:` e.g. `n:Spirit Blossom`
+- `author:` e.g. `a:moga`
+- `wad:` e.g `w:aurora`
+
+Logic Statements:
+- `||` OR statement, e.g. `Briar || Zoe`
+
+## CLI
+While the app is running, you can call the executable again with flags, to execute specific actions.
+
+> [!TIP]
+> This will bring the app to front.
+
+Actions are executed in a fixed order, the order of the flags do not affect execution order.
+- `--start` to start the mod loader
+- `--sp` to switch the currently selected profile
+- `--stop` to stop the mod loader
+- `--dbu` to prevent the app from being brought to front
+
+# Credits:
+- [League Toolkit](https://github.com/LeagueToolkit)
+- [Jade's RitoBin](https://github.com/RitoShark/Jade-League-Bin-Editor)
+- [Manifest Downloader](https://github.com/Morilli/ManifestDownloader)

@@ -1,0 +1,53 @@
+name: Build ModLoader
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: |
+          8.0.x
+          10.0.x
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Test BIN delta builder
+      run: cargo test --locked --manifest-path game-data-overlay/Cargo.toml
+
+    - name: Build BIN delta helper
+      run: |
+        cargo build --release --locked --manifest-path game-data-overlay/Cargo.toml
+
+    - name: Test modpkg import and export
+      env:
+        CSLOL_TEST_MOD_TOOLS: ${{ github.workspace }}\Tools\mod-tools.exe
+      run: dotnet test tests/ModPkg.Tests/ModPkg.Tests.csproj --configuration Release
+
+    - name: Restore dependencies
+      run: dotnet restore ModLoader.sln
+
+    - name: Build
+      run: dotnet build ModLoader.sln --configuration Release --no-restore
+
+    - name: Publish
+      run: dotnet publish ModLoader/ModLoader.csproj -c Release -o ./publish
+
+    - name: Upload Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ModLoader-Build
+        path: ./publish

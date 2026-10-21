@@ -1,0 +1,4400 @@
+using Jade.Ritobin;
+using Microsoft.Win32.SafeHandles;
+using System.Buffers;
+using System.Buffers.Binary;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
+using System.IO;
+using System.IO.Compression;
+using System.IO.Hashing;
+using System.Net.Http;
+using System.Runtime.ConstrainedExecution;
+using System.Security.Policy;
+using System.Text;
+using System.Text.RegularExpressions;
+using System.Windows;
+using System.Windows.Documents;
+using System.Windows.Shapes;
+using ZstdSharp;
+using static ModManager.Repatheruwu;
+using static ModManager.Repatheruwu.WadExtractor;
+using static System.Net.Mime.MediaTypeNames;
+using Path = System.IO.Path;
+using SearchOption = System.IO.SearchOption;
+
+namespace ModManager
+{
+    public interface IFixerLogger
+    {
+        void UpperLog(string text, string hexColor = "#FFFFFF");
+        void LowerLog(string text, string hexColor = "#FFFFFF");
+    }
+    // 2. Updated Dummy logger that saves to a text file
+    public class DummyLogger : IFixerLogger
+    {
+        private readonly string _filePath;
+
+        // You can change the default filename here or pass it in the constructor
+        public DummyLogger(string filePath = "fixer_log.txt")
+        {
+            _filePath = filePath;
+        }
+
+        public void UpperLog(string text, string hexColor = "#FFFFFF")
+        {
+            // WriteToFile(text, hexColor);
+        }
+
+        public void LowerLog(string text, string hexColor = "#FFFFFF")
+        {
+            Console.WriteLine(text);
+        }
+
+        private void WriteToFile(string text, string hexColor)
+        {
+            try
+            {
+                // Requested format: color:{text}
+                string line = $"{hexColor}:{text}{Environment.NewLine}";
+
+                // Appends the line to the file, creating it if it doesn't exist
+                File.AppendAllText(_filePath, line);
+            }
+            catch
+            {
+                // Ideally, a logger shouldn't crash the app if file I/O fails
+            }
+        }
+    }
+
+    public class FixerSettings
+    {
+        // NO LONGER STATIC
+        public string Character { get; set; } = "";
+        public int skinNo { get; set; } = 0;
+        public bool apply1617binconvertion { get; set; } = true;
+        public int HealthbarStyle { get; set; } = 12;
+        public bool verifyHpBar { get; set; } = true;
+        public string inputDir { get; set; } = "TEMP";
+        public string outputDir { get; set; } = ".";
+        public string WADpath { get; set; } = "C:\\Riot Games\\League of Legends\\Game\\DATA\\FINAL";
+        public List<string> AllWadPaths = [];
+        public string repath_path_path { get; set; } = "";
+        public bool in_file_path { get; set; } = true;
+        public bool cls_assets { get; set; } = true;
+        public string shaderhashes_path { get; set; } = "cslol-tools\\hashes.shaders.txt";
+        public List<string> base_wad_path { get; set; } = [];
+        public List<string> OldLookUp { get; set; } = [];
+
+        public List<string> LangLookUp { get; set; } = [];
+        public bool Lang { get; set; } = true; // good
+
+        public bool keep_Icons { get; set; } = true; // keep ability icons, if modified by mod
+        public bool KillStaticMat { get; set; } = false; // kill static material definitions
+        public bool sfx_events { get; set; } = false; // keep sfx_events.bnk (not recomended)
+        public bool folder { get; set; } = true; // output folder (else wad.client archive)
+        public bool binless { get; set; } = false; // only verify assets, dont write/delete bin logics
+        public bool SmallMod { get; set; } = true; // dont add missing assets, only verify paths
+        public bool SkipCheckup { get; set; } = false; // skip verification of paths (automatizion optimization)
+        public bool noskinni { get; set; } = true; // Apply custom skin to all other skin
+        public bool FixiShape { get; set; } = true;
+        public bool AllAviable { get; set; } = true; // process all aviable skins (based on bins contained)
+        public int SoundOption { get; set; } = 0; // auto/include/exclude sound archives
+        public int AnimOption { get; set; } = 0; // auto/include/exclude animation files
+        public double percent { get; set; } = 80; // minmum % of similarity to use other bin as substitute in case of fallback when looking for linked bins
+
+        public List<string> Missing_Bins { get; set; } = new List<string>();
+        public List<string> Missing_Files { get; set; } = new List<string>();
+        public List<string> Missing_VFX { get; set; } = new List<string>();
+        public int Missing_SCP { get; set; } = 0;
+        public int Missing_RR { get; set; } = 0;
+        public int Missing_AGD { get; set; } = 0;
+        public int Missing_CAC { get; set; } = 0;
+        public List<string> CharraBlackList = ["viegowraith"];
+        public List<string> CharraBlackList_Lux = ["luxair", "luxdark", "luxfire", "luxice", "luxmagma", "luxmystic", "luxnature", "luxstorm", "luxwater"];
+        public uint bnk_version { get; set; } = 145;
+        public string manifest_145 { get; set; } = "https://lol.secure.dyn.riotcdn.net/channels/public/releases/998BEDBD1E22BD5E.manifest";
+        public List<ShaderEntry> shaders { get; set; } = null;
+        public string ManfiestDL { get; set; } = Path.Combine("cslol-tools", "ManifestDownloader.exe");
+        public List<string> hash_table { get; set; } = new List<string>();
+    }
+    public class ShaderEntry
+    {
+        public uint Hash { get; set; }
+        public string Path { get; set; }
+        public bool Exists { get; set; } = false; // Default to false until verified
+    }
+    public class Repatheruwu
+    {
+        Dictionary<string, List<string>> CharacterCases = new Dictionary<string, List<string>>
+        {
+            ["anivia"] = new List<string> { "aniviaegg", "aniviaiceblock", },
+            ["annie"] = new List<string> { "annietibbers", },
+            ["aphelios"] = new List<string> { "apheliosturret", },
+            ["aurora"] = new List<string> { "auroraspirits", },
+            ["azir"] = new List<string> { "azirsoldier", "azirsundisc", "azirtowerclicker", "azirultsoldier", },
+            ["bard"] = new List<string> { "bardfollower", "bardhealthshrine", "bardpickup", "bardpickupnoicon", "bardportalclickable", },
+            ["bardpickup"] = new List<string> { "bardpickupnoicon", },
+            ["belveth"] = new List<string> { "belvethspore", "belvethvoidling", },
+            ["caitlyn"] = new List<string> { "caitlyntrap", },
+            ["cassiopeia"] = new List<string> { "cassiopeia_death", },
+            ["elise"] = new List<string> { "elisespider", "elisespiderling", },
+            ["elisespider"] = new List<string> { "elisespiderling", },
+            ["fiddlesticks"] = new List<string> { "fiddlestickseffigy", },
+            ["fizz"] = new List<string> { "fizzbait", "fizzshark", },
+            ["gangplank"] = new List<string> { "gangplankbarrel", },
+            ["gnar"] = new List<string> { "gnarbig", },
+            ["heimerdinger"] = new List<string> { "heimertblue", "heimertyellow", },
+            ["illaoi"] = new List<string> { "illaoiminion", },
+            ["irelia"] = new List<string> { "ireliablades", },
+            ["ivern"] = new List<string> { "ivernminion", "iverntotem", },
+            ["jarvaniv"] = new List<string> { "jarvanivstandard", "jarvanivwall", },
+            ["jhin"] = new List<string> { "jhintrap", },
+            ["jinx"] = new List<string> { "jinxmine", },
+            ["kalista"] = new List<string> { "kalistaaltar", "kalistaspawn", },
+            ["kindred"] = new List<string> { "kindredjunglebountyminion", "kindredwolf", },
+            ["kled"] = new List<string> { "kledmount", "kledrider", },
+            ["kogmaw"] = new List<string> { "kogmawdead", },
+            ["lissandra"] = new List<string> { "lissandrapassive", },
+            ["lulu"] = new List<string> { "lulufaerie", "lulupolymorphcritter", },
+            ["malzahar"] = new List<string> { "malzaharvoidling", },
+            ["maokai"] = new List<string> { "maokaisproutling", },
+            ["milio"] = new List<string> { "miliominion", },
+            ["monkeyking"] = new List<string> { "monkeykingclone", "monkeykingflying", },
+            ["naafiri"] = new List<string> { "naafiripackmate", },
+            ["nasus"] = new List<string> { "nasusult", },
+            ["nidalee"] = new List<string> { "nidaleecougar", "nidaleespear", },
+            ["nunu"] = new List<string> { "nunusnowball", },
+            ["olaf"] = new List<string> { "olafaxe", },
+            ["orianna"] = new List<string> { "oriannaball", "oriannanoball", },
+            ["ornn"] = new List<string> { "ornnram", },
+            ["quinn"] = new List<string> { "quinnvalor", },
+            ["rammus"] = new List<string> { "rammusdbc", "rammuspb", },
+            ["reksai"] = new List<string> { "reksaitunnel", },
+            ["ruby_jinx"] = new List<string> { "ruby_jinx_monkey", },
+            ["senna"] = new List<string> { "sennasoul", },
+            ["shaco"] = new List<string> { "shacobox", },
+            ["shen"] = new List<string> { "shenspirit", },
+            ["shyvana"] = new List<string> { "shyvanadragon", },
+            ["sona"] = new List<string> { "sonadjgenre01", "sonadjgenre02", "sonadjgenre03", },
+            ["strawberry_aurora"] = new List<string> { "strawberry_auroraspirits", },
+            ["strawberry_illaoi"] = new List<string> { "strawberry_illaoiminion", },
+            ["swain"] = new List<string> { "swaindemonform", },
+            ["syndra"] = new List<string> { "syndraorbs", "syndrasphere", },
+            ["taliyah"] = new List<string> { "taliyahwallchunk", },
+            ["teemo"] = new List<string> { "teemomushroom", },
+            ["thresh"] = new List<string> { "threshlantern", },
+            ["trundle"] = new List<string> { "trundlewall", },
+            ["vi"] = new List<string> { "viego", "viegosoul", "viktor", "viktorsingularity", },
+            ["viego"] = new List<string> { "viegosoul", },
+            ["viktor"] = new List<string> { "viktorsingularity", },
+            ["yorick"] = new List<string> { "yorickbigghoul", "yorickghoulmelee", "yorickwghoul", "yorickwinvisible", },
+            ["zac"] = new List<string> { "zacrebirthbloblet", },
+            ["zed"] = new List<string> { "zedshadow", },
+            ["zoe"] = new List<string> { "zoeorbs", },
+            ["zyra"] = new List<string> { "zyragraspingplant", "zyrapassive", "zyraseed", "zyrathornplant", },
+        };
+
+        public FixerSettings Settings { get; private set; }
+        private WadExtractor _wadExtractor;
+        private PathFixer _pathFixer;
+        private IFixerLogger x;
+        private BinFieldConverter binconverter = new BinFieldConverter();
+
+        // Constants for Logging Colors
+        private const string CLR_ACT = "#2a84d2";   // Blue
+        private const string CLR_ERR = "#f81118";   // Red
+        private const string CLR_WARN = "#ecba0f";  // Yellow
+        private const string CLR_GOOD = "#2dc55e";  // Green
+        private const string CLR_MOD = "#5350b9";   // Purple
+
+        public Repatheruwu()
+        {
+            Settings = new FixerSettings();
+            _wadExtractor = new WadExtractor(Settings);
+            _pathFixer = new PathFixer(Settings);
+        }
+
+        public static uint FNV1aHash(string input)
+        {
+            const uint FNV_OFFSET_BASIS = 0x811C9DC5;
+            const uint FNV_PRIME = 0x01000193;
+
+            uint hash = FNV_OFFSET_BASIS;
+            byte[] data = Encoding.UTF8.GetBytes(input.ToLowerInvariant());
+
+            foreach (byte b in data)
+            {
+                hash ^= b;
+                hash *= FNV_PRIME;
+            }
+
+            return hash;
+        }
+
+        // League of legends Bin elements hash
+        public enum Defi : uint
+        {
+            ContextualActionData = 3476110372,
+            VfxSystemDefinitionData = 1171098015,
+            ResourceResolver = 4013559603,
+            SkinCharacterDataProperties = 2607278582,
+            AbilityObject = 3696800942,
+            SpellObject = 1585338886,
+            RecSpellRankUpInfolist = 1496570494,
+            ItemRecommendationContextList = 2188140632,
+            JunglePathRecommendation = 226436980,
+            ItemRecommendationOverrideSet = 2753712911,
+            CharacterRecord = 602544405,
+            StatStoneSet = 2524344308,
+            StatStoneData = 3978526660,
+            StaticMaterialDef = 4288492553,
+            GearSkinUpgrade = 668820321,
+            AnimationGraphData = 4126869447
+        }
+        // WWise hash for given language
+        public enum lang_id : uint
+        {
+            ar_AE = 3254137205,
+            cs_CZ = 877555794,
+            de_DE = 4290373403,
+            el_GR = 4147287991,
+            en_US = 684519430,
+            es_ES = 235381821,
+            es_MX = 3671217401,
+            fr_FR = 323458483,
+            hu_HU = 370126848,
+            it_IT = 1238911111,
+            ja_JP = 2008704848,
+            ko_KR = 3391026937,
+            pl_PL = 559547786,
+            pt_BR = 960403217,
+            ro_RO = 4111048996,
+            ru_RU = 2577776572,
+            th_TH = 3325617959,
+            tr_TR = 4036333791,
+            vi_VN = 2847887552,
+            zh_CN = 3948448560,
+            zh_TW = 2983963595
+        }
+
+        private Queue<(string, int, bool, string)> Characters = new Queue<(string, int, bool, string)>();
+        public (int, bool) getSkinInts(string charra)
+        {
+            List<int> Skins = _wadExtractor.GetAvailableSkinNumbers(Settings.base_wad_path, charra);
+            var (i, b) = ProcessAviableSkin2(Skins);
+            return (i, b);
+        }
+        // public (int, bool) ProcessAviableSkin2(List<int> entries)
+        // {
+        //     Logger.Log(string.Join(", ", entries));
+        //     if (entries == null || entries.Count == 0)
+        //     {
+        //         return (0, true);
+        //     }
+        // 
+        //     if (entries.Count == 1)
+        //     {
+        //         return (entries[0], false);
+        //     }
+        // 
+        //     bool isSequential = false;
+        // 
+        //     var sequenceLengths = new List<int>();
+        //     int currentLength = 1;
+        //     for (int i = 0; i < entries.Count - 1; i++)
+        //     {
+        //         if (entries[i + 1] == entries[i] + 1)
+        //         {
+        //             currentLength++;
+        //         }
+        //         else
+        //         {
+        //             sequenceLengths.Add(currentLength);
+        //             currentLength = 1;
+        //         }
+        //     }
+        //     sequenceLengths.Add(currentLength);
+        //     if (sequenceLengths.Count == 1 && sequenceLengths?[0] < 12)
+        //     {
+        //         isSequential = true;
+        //     }
+        //     else
+        //     {
+        //         isSequential = sequenceLengths.Any(len => len > 4);
+        //     }
+        //     if (isSequential || entries.Count > 8)
+        //     {
+        //         return (0, false);
+        //     }
+        //     else
+        //     {
+        //         return (-1, false);
+        //     }
+        // }
+        // 
+
+        public (int, bool) ProcessAviableSkin2(List<int> entries)
+        {
+            // 1. Empty list check
+            if (entries == null || entries.Count == 0)
+            {
+                Logger.Log("Entries empty or null.");
+                return (0, true);
+            }
+
+            Logger.Log(string.Join(", ", entries));
+
+            // 2. Regular Skin (Exactly one ID)
+            if (entries.Count == 1)
+            {
+                return (entries[0], false);
+            }
+
+            // Sort the entries to make sequence and bloat detection reliable
+            var sortedEntries = entries.OrderBy(x => x).ToList();
+            int minId = sortedEntries[0];
+
+            // Check if the entire list forms a contiguous sequence
+            bool isPerfectSequence = true;
+            for (int i = 0; i < sortedEntries.Count - 1; i++)
+            {
+                if (sortedEntries[i + 1] != sortedEntries[i] + 1)
+                {
+                    isPerfectSequence = false;
+                    break;
+                }
+            }
+
+            if (isPerfectSequence)
+            {
+                // 3. Repathed Skin: A perfect sequence starting strictly at 0
+                if (minId == 0)
+                {
+                    return (0, false);
+                }
+
+                // 4. Chroma: A perfect sequence that does NOT start at 0
+                return (-1, false);
+            }
+
+            // 5. Regular skin with random spam/bloat
+            // If it's not a perfect sequence but we have multiple IDs, return the lowest ID
+            return (minId, false);
+        }
+
+        public void ProcessAviableSkin(List<int> entries, string charra)
+        {
+            x.LowerLog($"rapathing following skin IDs for {charra}: {string.Join(", ", entries)}", CLR_ACT);
+
+            // 1. Handle null or empty
+            if (entries == null || entries.Count == 0)
+            {
+                Characters.Enqueue((charra, 0, true, ""));
+                return;
+            }
+
+    //         string shortChar = charra.Length > 4
+    //              ? charra.Substring(0, 4)
+    //              : charra;
+    //         string prefix = $"{shortChar}_skin{entries[0]}";
+            foreach (var entry in entries)
+            {
+                Characters.Enqueue((charra, entry, true, ""));
+            }
+        }
+        private Dictionary<uint, ShaderEntry> _byHash = new Dictionary<uint, ShaderEntry>();
+        private Dictionary<string, List<(string, ShaderEntry)>> _byPath = new Dictionary<string, List<(string, ShaderEntry)>>();
+        private void FetchShaders()
+        {
+            string shaderbinpath = "data/shaders/shaders.bin";
+            Settings.shaders = new List<ShaderEntry>();
+
+            if (!File.Exists(Settings.shaderhashes_path))
+            {
+                Console.WriteLine($"[EROR] Shader Hashes are Missing");
+                return;
+            }
+
+            // Read all lines at once
+            string[] lines = File.ReadAllLines(Settings.shaderhashes_path);
+
+            foreach (string line in lines)
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+
+                // Split into [HashString, Path]
+                string[] parts = line.Trim().Split(new[] { ' ' }, 2);
+                if (parts.Length < 2) continue;
+
+                if (!uint.TryParse(parts[0], NumberStyles.HexNumber, null, out uint hash))
+                {
+                    // Skip if the hash isn't a valid hex number
+                    continue;
+                }
+
+                string path = parts[1];
+
+                var entry = new ShaderEntry { Hash = hash, Path = path, Exists = false };
+
+                // 3. STORE
+                if (!_byHash.ContainsKey(hash)) _byHash.Add(hash, entry);
+            }
+
+
+
+
+            WadExtractor.Target Shader = new WadExtractor.Target
+            {
+                Hashes = new List<string> { shaderbinpath },
+                OutputPath = Settings.inputDir,
+                OutputString = $"{HashMaster.HashPath(shaderbinpath).ToString("x16")}.bin",
+                BinStringRef = null,
+                OriginalPath = shaderbinpath,
+            };
+            _wadExtractor.ExtractAndSwapReferences([Path.Combine(Settings.WADpath, "Shaders", "Shaders.wad.client")], [Shader]);
+            Bin bin = null;
+            try
+            {
+                bin = LoadBin(shaderbinpath);
+            }
+            catch (Exception e)
+            {
+                x.UpperLog($"[FAIL] Failed to load {shaderbinpath}, {e}", CLR_WARN);
+                return;
+            }
+            if (bin == null) return;
+
+            HashSet<uint> existingHashes = new HashSet<uint>();
+            if (bin.Sections.TryGetValue("entries", out BinValue entriesSection) && entriesSection is BinMap entriesMap)
+            {
+                foreach (var kvp in entriesMap.Items)
+                {
+                    var entryKey = (BinHash)kvp.Key;
+                    var entryData = (BinEmbed)kvp.Value;
+                    uint hash = entryKey.Value.Hash;
+
+                    if (hash == 0) continue;
+
+                    if (entryData.Name.Hash == 0x205255d6) // CustomShaderDef
+                    {
+                        existingHashes.Add(entryKey.Value.Hash);
+                    }
+                }
+            }
+            foreach (var kvp in _byHash)
+            {
+                if (existingHashes.Contains(kvp.Key))
+                {
+                    kvp.Value.Exists = true;
+                    string[] parts = kvp.Value.Path.Split("/");
+                    if (parts.Length < 3) continue;
+                    if (!_byPath.ContainsKey(parts[1]))
+                    {
+                        _byPath.Add(parts[1], [(parts[2], kvp.Value)]);
+                    }
+                    else
+                    {
+                        _byPath[parts[1]].Add((parts[2], kvp.Value));
+                    }
+                }
+            }
+        }
+
+        public (uint, string, string) GetShaderOrFallback(uint targetHash)
+        {
+            if (!_byHash.TryGetValue(targetHash, out ShaderEntry originalPath))
+            {
+                x.LowerLog($"[FAIL] Unknown Shader hash uint:{targetHash}");
+                return (targetHash, "", "");
+            }
+            if (originalPath.Exists)
+            {
+                return (targetHash, originalPath.Path, ""); ;
+            }
+            else
+            {
+                x.LowerLog($"[FIXI] Updating Shader: {originalPath.Path}", CLR_MOD);
+                return FindFallbackHash(originalPath);
+            }
+
+        }
+
+        public (uint, string, string) FindFallbackHash(ShaderEntry Shader)
+        {
+            string[] parts = Shader.Path.Split("/");
+            if (parts.Length < 3) return (Shader.Hash, Shader.Path, "");
+
+            if (!_byPath.TryGetValue(parts[1], out var candidates))
+            {
+                return (Shader.Hash, Shader.Path, "");
+            }
+
+            HashSet<string> targetTokens = [.. parts[^1].Split('_')];
+            if (targetTokens.Remove("MultiLayered"))
+            {
+                targetTokens.Add("MultiLayer");
+            }
+            if (targetTokens.Remove("Addative"))
+            {
+                targetTokens.Add("Additive");
+            }
+            ShaderEntry bestMatch = null;
+            int bestMutualCount = -1;
+            int bestNonMutualCount = int.MaxValue;
+
+            foreach (var (candName, candEntry) in candidates)
+            {
+                string[] candidateTokens = candName.Split('_');
+
+                int mutual = 0;
+                int nonMutual = 0;
+
+                foreach (var token in candidateTokens)
+                {
+                    if (targetTokens.Contains(token))
+                    {
+                        mutual++;
+                    }
+                    else
+                    {
+                        nonMutual++;
+                    }
+                }
+
+                if (mutual == 0) continue;
+
+                bool isBetter = false;
+
+                if (mutual > bestMutualCount)
+                {
+                    isBetter = true;
+                }
+                else if (mutual == bestMutualCount)
+                {
+                    if (nonMutual < bestNonMutualCount)
+                    {
+                        isBetter = true;
+                    }
+                }
+                if (isBetter)
+                {
+                    bestMutualCount = mutual;
+                    bestNonMutualCount = nonMutual;
+                    bestMatch = candEntry;
+                }
+            }
+            if (bestMatch is not null)
+            {
+                return (bestMatch.Hash, Shader.Path, bestMatch.Path);
+            }
+            else
+            {
+                return (Shader.Hash, Shader.Path, "");
+            }
+        }
+
+        public void FixiniYoursSkini(IFixerLogger ui = null)
+        {
+            this.x = ui ?? new DummyLogger();
+            Settings.AllWadPaths = CollectWads(Settings.WADpath);
+            _wadExtractor.x = this.x;
+            string tmp = Path.Combine(Path.GetTempPath(), "cslolgo_fixer_" + Guid.NewGuid().ToString());
+
+            if (Settings.apply1617binconvertion) {
+                foreach (string filePath in Directory.GetFiles("cslol-tools/convert_tables/"))
+                {
+                    binconverter.LoadRulesFromFile(filePath);
+                    // MessageBox.Show(filePath);
+                }
+            }
+            Directory.CreateDirectory(tmp);
+            Settings.inputDir = tmp;
+
+            if (Settings.binless) Settings.percent = 100;
+
+            for (int i = 0; i < Settings.base_wad_path.Count; i++)
+            {
+                string currentPath = Settings.base_wad_path[i];
+
+                if (Directory.Exists(currentPath))
+                {
+                    _wadExtractor.CreateTopazMap(currentPath);
+                }
+
+            }
+
+            _wadExtractor.ExtractAndLoadTemporaryHashes(Settings.base_wad_path);
+            if (Settings.AllAviable)
+            {
+                List<int> Skins = _wadExtractor.GetAvailableSkinNumbers(Settings.base_wad_path, Settings.Character);
+                ProcessAviableSkin(Skins, Settings.Character);
+            }
+            else
+            {
+                Characters.Enqueue((Settings.Character, Settings.skinNo, true, ""));
+            }
+
+            FetchShaders();
+            List<string> seen = new List<string>();
+            while (Characters.Count > 0)
+            {
+                var (Current_Char, skinNo, HpBar, Prefix) = Characters.Dequeue();
+                x.LowerLog($"[FIXI] Fixing {Current_Char} skin {skinNo}", CLR_ACT);
+
+                if (seen.Contains($"{Current_Char}{skinNo}", StringComparer.OrdinalIgnoreCase)) continue;
+                seen.Add($"{Current_Char}{skinNo}");
+
+                Settings.Character = Current_Char;
+                Settings.skinNo = skinNo;
+                Settings.verifyHpBar = HpBar;
+                if (Prefix != "")
+                    Settings.repath_path_path = Prefix;
+                string shortChar = Current_Char.Length > 4
+    ? Current_Char.Substring(0, 4)
+    : Current_Char;
+                if (Settings.repath_path_path == "")
+                    Settings.repath_path_path = $"@{shortChar}{skinNo}";
+                string binPath = $"data/characters/{Settings.Character}/skins/skin{Settings.skinNo}.bin";
+                var check = CheckLinked([binPath]);
+                if (check != null)
+                {
+                    x.LowerLog($"[FAIL] Failed to find {binPath}, Aborting", CLR_ERR);
+                    return;
+                }
+
+
+                var (binentries, concat, staticMat, allStrings, linkedList) = LoadAllBins(binPath);
+                if (binentries is null)
+                {
+                    x.LowerLog($"[SKIP] Coudnt Find SkinCharacterProperties, Skipping {Settings.Character} skin {Settings.skinNo}", CLR_WARN);
+                    continue;
+                }
+                if (Settings.apply1617binconvertion)
+                {
+                    ConvertedStringsTracker tracker = new ConvertedStringsTracker();
+                    binconverter.ConvertBinMap(binentries, tracker);
+                    binconverter.ConvertBinMap(concat, tracker);
+                    binconverter.ConvertBinMap(staticMat, tracker);
+                    Settings.hash_table.AddRange(tracker.GameFiles);
+                }
+                if (HpBar)
+                {
+                    Settings.Missing_SCP += binentries.Items.Any(x =>
+                        ((BinEmbed)x.Value).Name.Hash == (uint)Defi.SkinCharacterDataProperties) ? 0 : 1;
+                    Settings.Missing_RR += binentries.Items.Any(x =>
+                        ((BinEmbed)x.Value).Name.Hash == (uint)Defi.ResourceResolver) ? 0 : 1;
+                    Settings.Missing_AGD += concat.Items.Any(x =>
+                        ((BinEmbed)x.Value).Name.Hash == (uint)Defi.AnimationGraphData) ? 0 : 1;
+                    Settings.Missing_CAC += concat.Items.Any(x =>
+                        ((BinEmbed)x.Value).Name.Hash == (uint)Defi.ContextualActionData) ? 0 : 1;
+                }
+                x.LowerLog($"[PROC] Processing Assets", CLR_ACT);
+
+                allStrings = process(allStrings);
+                x.LowerLog($"[DONE] Done Processing Assets", CLR_ACT);
+                // foreach (var item in allStrings) {
+                //      x.LowerLog($"[MISS] {item.OriginalPath}", CLR_ERR);
+                // }
+
+                var key = CharacterCases.Keys
+    .FirstOrDefault(k =>
+        string.Equals(k, Current_Char, StringComparison.OrdinalIgnoreCase));
+
+                if (key != null)
+                {
+                    foreach (var name in CharacterCases[key])
+                    {
+                        Characters.Enqueue((name, skinNo, false, ""));
+                        // linkedList.Items.AdFd(new BinString($"data/{name}_skin{skinNo}_concat.bin"));
+                    }
+                }
+                if (Settings.Character.ToLower() == "lux" && Settings.skinNo == 7)
+                {
+                    foreach (string luxi in Settings.CharraBlackList_Lux)
+                    {
+                        Characters.Enqueue((luxi, 7, true, ""));
+                    }
+                }
+
+                if (Settings.binless) continue;
+
+                x.LowerLog($"[SAVE] Saving Bins", CLR_ACT);
+                string conat_path = $"data/{Settings.Character}_skin{Settings.skinNo}_concat.bin";
+                var EmptyLinked = new BinList(BinType.String);
+                x.LowerLog($"[SAVE] {conat_path}", CLR_ACT);
+                Save_Bin(EmptyLinked, concat, $"{Settings.outputDir}/{conat_path}");
+                linkedList.Items.Add(new BinString(conat_path));
+
+                if (staticMat.Items.Count() > 0)
+                {
+                    string static_mat_path = $"data/{Settings.Character}_skin{Settings.skinNo}_StaticMat.bin";
+                    x.LowerLog($"[SAVE] {static_mat_path}", CLR_ACT);
+                    Save_Bin(EmptyLinked, staticMat, $"{Settings.outputDir}/{static_mat_path}");
+                    if (!Settings.KillStaticMat)
+                    {
+                        linkedList.Items.Add(new BinString(static_mat_path));
+                    }
+                    // else
+                    // {
+                    //     string static_mat_path_proxy = $"data/{Settings.Character}_skin{Settings.skinNo}_StaticMat_proxy.bin";
+                    //     EmptyLinked.Items.Add(new BinString(static_mat_path));
+                    //     var EmptyEntries = new BinMap(BinType.Hash, BinType.Embed);
+                    //     x.LowerLog($"[SAVE] {static_mat_path_proxy}", CLR_ACT);
+                    //     Save_Bin(EmptyLinked, EmptyEntries, $"{Settings.outputDir}/{static_mat_path_proxy}");
+                    //     linkedList.Items.Add(new BinString(static_mat_path_proxy));
+                    // }
+                }
+
+                x.LowerLog($"[SAVE] {binPath}", CLR_ACT);
+                Save_Bin(linkedList, binentries, $"{Settings.outputDir}/{binPath}");
+                if (Settings.noskinni && Settings.skinNo == 0)
+                {
+                    x.LowerLog($"[SKIN] Creating No Skinni Lightinni Italini", CLR_MOD);
+
+                    var skinEntry = binentries.Items.First(x => ((BinEmbed)x.Value).Name.Hash == (uint)Defi.SkinCharacterDataProperties);
+                    var skinKeyRef = (BinHash)skinEntry.Key;
+
+                    var rrLinkRef = ((BinEmbed)skinEntry.Value).Items.FirstOrDefault(x => x.Key.Hash == 0x62286e7e)?.Value as BinLink;
+
+                    var rrEntry = binentries.Items.FirstOrDefault(x => ((BinEmbed)x.Value).Name.Hash == (uint)Defi.ResourceResolver);
+                    var rrKeyRef = rrEntry.Key != null ? (BinHash)rrEntry.Key : null;
+
+                    List<int> tonoskin = _wadExtractor.GetAvailableSkinNumbers(Settings.AllWadPaths.Where(s => s.Contains($"{Current_Char}.wad.client", StringComparison.OrdinalIgnoreCase)).ToList(), Current_Char);
+
+                    foreach (int i in tonoskin.Skip(1))
+                    {
+                        binPath = $"data/characters/{Settings.Character}/skins/skin{i}.bin";
+
+                        uint newSkinHash = FNV1aHash($"Characters/{Settings.Character}/Skins/Skin{i}");
+                        uint newRRHash = FNV1aHash($"Characters/{Settings.Character}/Skins/Skin{i}/Resources");
+
+                        skinKeyRef.Value = new FNV1a(newSkinHash);
+                        if (rrLinkRef?.Value != null) rrLinkRef.Value = new FNV1a(newRRHash);
+                        if (rrKeyRef != null) rrKeyRef.Value = new FNV1a(newRRHash);
+
+                        Save_Bin(linkedList, binentries, $"{Settings.outputDir}/{binPath}");
+                    }
+                }
+
+            }
+            if (Settings.hash_table.Count > 0)
+            {
+                File.WriteAllLines($"{Settings.outputDir}/hashes.game.txt", Settings.hash_table);
+            }
+            // if (!Settings.folder)
+            // {
+            //     x.LowerLog("[PACK] Packing WAD", CLR_ACT);
+            //     _wadExtractor.PackDirectoryToWadCompressed(Settings.outputDir, $"{Settings.outputDir}.client");
+            //     Directory.Delete(Settings.outputDir, true);
+            // }
+
+
+            if (Directory.Exists(Settings.inputDir)) Directory.Delete(Settings.inputDir, true);
+
+            // ==================== DEFINITION & ASSET AUDIT ====================
+            var uniqueMissingBins = Settings.Missing_Bins.Distinct().ToList();
+            var uniqueMissingVfx = Settings.Missing_VFX?.Distinct().ToList() ?? new List<string>();
+            var uniqueMissingFiles = Settings.Missing_Files.Distinct().ToList();
+
+            // Core Definition Checks (Bools)
+            bool hasMissingSkinProps = Settings.Missing_SCP > 0;
+            bool hasMissingAnimGraph = Settings.Missing_AGD > 0;
+            bool hasMissingRr = Settings.Missing_RR > 0;
+            bool hasMissingCac = Settings.Missing_CAC > 0;
+
+            // Categorized Asset Files
+            var missingAnmFiles = uniqueMissingFiles.Where(f => f.EndsWith(".anm", StringComparison.OrdinalIgnoreCase)).ToList();
+            var missingMeshFiles = uniqueMissingFiles.Where(f => f.EndsWith(".scb", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".sco", StringComparison.OrdinalIgnoreCase)).ToList();
+            var missingTexFiles = uniqueMissingFiles.Where(f => f.EndsWith(".dds", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".tex", StringComparison.OrdinalIgnoreCase)).ToList();
+            var missingAudioFiles = uniqueMissingFiles.Where(f => f.EndsWith(".bnk", StringComparison.OrdinalIgnoreCase) || f.EndsWith(".wpk", StringComparison.OrdinalIgnoreCase)).ToList();
+            var missingOtherFiles = uniqueMissingFiles.Except(missingAnmFiles)
+                                                      .Except(missingMeshFiles)
+                                                      .Except(missingTexFiles)
+                                                      .Except(missingAudioFiles).ToList();
+
+            bool hasMissingAnm = missingAnmFiles.Count > 0;
+            bool hasMissingMesh = missingMeshFiles.Count > 0;
+            bool hasMissingTextures = missingTexFiles.Count > 0;
+            bool hasMissingAudio = missingAudioFiles.Count > 0;
+            bool hasMissingVfx = uniqueMissingVfx.Count > 0;
+
+            bool isClean = !hasMissingSkinProps && !hasMissingAnimGraph && !hasMissingAnm
+                        && !hasMissingRr && !hasMissingVfx && !hasMissingCac
+                        && !hasMissingMesh && !hasMissingTextures && !hasMissingAudio;
+
+            // ==================== DETAILED REPORT (UPPER LOG) ====================
+            // Order mirrors LowerLog evaluation: Definitions -> Animations -> Meshes -> Textures -> Audio -> Bins/Other
+
+            if (hasMissingAnm)
+            {
+                foreach (var anm in missingAnmFiles)
+                {
+                    x.UpperLog($"[MISS] {anm}", CLR_ERR);
+                }
+            }
+            if (hasMissingMesh)
+            {
+                foreach (var mesh in missingMeshFiles)
+                {
+                    x.UpperLog($"[MISS] {mesh}", CLR_WARN);
+                }
+            }
+            if (hasMissingTextures)
+            {
+                foreach (var tex in missingTexFiles)
+                {
+                    x.UpperLog($"[MISS] {tex}", CLR_WARN);
+                }
+            }
+            if (hasMissingAudio)
+            {
+                foreach (var audio in missingAudioFiles)
+                {
+                    x.UpperLog($"[MISS] {audio}", CLR_WARN);
+                }
+            }
+
+            if (missingOtherFiles.Count > 0)
+            {
+                foreach (var file in missingOtherFiles)
+                {
+                    x.UpperLog($"[MISS] {file}", CLR_WARN);
+                }
+            }
+
+            x.LowerLog("─────────────────────────────────────────", CLR_ACT);
+
+            if (isClean)
+            {
+                x.LowerLog("[DONE] Mod if Fixed, Good luck have fun ^^", CLR_GOOD);
+                x.UpperLog("[Done] Fin", CLR_GOOD);
+            }
+            else
+            {
+
+                if (hasMissingMesh)
+                {
+                    x.LowerLog($"[WARN] Missing ({missingMeshFiles.Count}) SCB files, elements of VFX might be missing", CLR_WARN);
+                }
+
+                if (hasMissingTextures)
+                {
+                    x.LowerLog($"[WARN] Missing some ({missingTexFiles.Count}) textures", CLR_WARN);
+                }
+                if (hasMissingVfx)
+                {
+                    x.LowerLog($"[WARN] Some ({uniqueMissingVfx.Count}) VFX are missing:", CLR_WARN);
+                    foreach (var vfx in uniqueMissingVfx)
+                    {
+                        x.LowerLog($"  [MISS] {vfx}", CLR_WARN);
+                    }
+                }
+                // Major Systems / VFX
+                if (hasMissingRr)
+                {
+                    x.LowerLog("[WARN] Missing Resource Resolver, VFX will be missing!!!!", CLR_ERR);
+                }
+
+
+                if (hasMissingAudio)
+                {
+                    x.LowerLog($"[WARN] Missing ({missingAudioFiles.Count}) soundbanks, silence expected", CLR_WARN);
+                }
+
+                if (hasMissingAnimGraph)
+                {
+                    x.LowerLog("[CRIT] Missing AnimationGraphData, Crash is guaranteed!!!!!", CLR_ERR);
+                }
+
+                if (hasMissingAnm)
+                {
+                    x.LowerLog("[CRIT] Missing .anm files, Crash is very likely!!!!!", CLR_ERR);
+                }
+
+                // Fatal / Guaranteed Crash
+                if (hasMissingSkinProps)
+                {
+                    x.LowerLog("[CRIT] Missing SkinCharacterDataProperties, Crash is guaranteed!!!!!", CLR_ERR);
+                }
+
+                // Audio & Aesthetics
+                if (hasMissingCac)
+                {
+                    x.LowerLog("[WARN] Missing Contextual Action Data (CAC), Voiceover will be missing!!!!", CLR_ERR);
+                }
+
+                // Verdict
+                if (hasMissingSkinProps || hasMissingAnimGraph || hasMissingAnm)
+                {
+                    x.LowerLog("[FINL] CRASH?", CLR_ERR);
+                }
+                else
+                {
+                    x.LowerLog("[FINL] Stuff might be missing, but should work i guess", CLR_WARN);
+                }
+            }
+        }
+
+        public void Save_Bin(BinList Linked, BinMap entries, string output)
+        {
+            var newBin = new Bin();
+            newBin.Sections["type"] = new BinString("PROP");
+            newBin.Sections["version"] = new BinU32(3);
+
+            newBin.Sections["linked"] = Linked;
+
+            newBin.Sections["entries"] = entries;
+
+            var writer = new BinWriter();
+            byte[] bytes = writer.Write(newBin);
+
+            Directory.CreateDirectory(Path.GetDirectoryName(output)!);
+            File.WriteAllBytes(output, bytes);
+        }
+
+        public List<WadExtractor.Target> process(List<WadExtractor.Target> processing)
+        {
+            List<WadExtractor.Target> ToCheckup = new List<WadExtractor.Target>();
+            Dictionary<WadExtractor.Target, uint> Event_bnk_lang = new Dictionary<WadExtractor.Target, uint>();
+            void check_n_fix_vo()
+            {
+                if (!Settings.SkipCheckup)
+                {
+                    ToCheckup = _wadExtractor.FindAndSwapReferences(Settings.AllWadPaths, ToCheckup);
+                    if (ToCheckup.Count > 0)
+                    {
+                        ToCheckup = HashMaster.FindMatches(ToCheckup);
+                        ToCheckup.RemoveAll(t =>
+                        {
+                            if (t.Hashes.Count == 0)
+                            {
+                                return true;
+                            }
+                            return false;
+                        });
+                        ToCheckup = _wadExtractor.FindAndSwapReferences(Settings.AllWadPaths, ToCheckup);
+                    }
+                    foreach (var chk in ToCheckup)
+                    {
+                        x.UpperLog($"[MISS] Could not verify path for {chk.OriginalPath}", CLR_ERR);
+                        Settings.Missing_Files.Add(chk.OriginalPath);
+                    }
+                }
+                Dictionary<string, List<WadExtractor.Target>> Audio_to_dl = new Dictionary<string, List<WadExtractor.Target>>();
+                foreach (var kvp in Event_bnk_lang)
+                {
+                    string wwise_file = Path.Combine(Settings.outputDir, kvp.Key.OutputString);
+                    if (!File.Exists(wwise_file)) continue;
+                    uint langID = 0;
+
+                    using (var fs = new FileStream(wwise_file, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length >= 20)
+                        {
+                            fs.Seek(16, SeekOrigin.Begin); // TODO
+                            langID = br.ReadUInt32();
+                        }
+                    }
+                    if (kvp.Value != langID)
+                    {
+                        var new_lang = (lang_id)kvp.Value;
+                        if (!Audio_to_dl.ContainsKey(new_lang.ToString()))
+                        {
+                            Audio_to_dl[new_lang.ToString()] = new List<WadExtractor.Target>();
+                        }
+                        Audio_to_dl[new_lang.ToString()].Add(kvp.Key);
+
+                        x.LowerLog($"[WRNG] Expected {(lang_id)kvp.Value} but found {(lang_id)langID} in {kvp.Key.OriginalPath}", CLR_WARN);
+                    }
+                    else
+                    {
+                        x.LowerLog($"[GOOD] {(lang_id)langID} in {kvp.Key.OriginalPath}", CLR_GOOD);
+                    }
+                }
+                if (Audio_to_dl.Count > 0 && File.Exists(Settings.ManfiestDL))
+                {
+                    foreach (var kv in Audio_to_dl)
+                    {
+                        string VO_path = Path.Combine("manifests", $".lang_{Settings.bnk_version}");
+                        string VO_wad = Path.Combine(VO_path, "DATA", "FINAL", "Champions", $"{Settings.Character}.{kv.Key}.wad.client");
+                        if (!File.Exists(VO_wad))
+                        {
+                            x.LowerLog($"[WAIT] Downloading {Settings.Character}.{kv.Key}.wad.client to fix events.bnk", CLR_MOD);
+                            string manifestFilePath = Path.Combine(VO_path, "this.manifest");
+                            if (!File.Exists(manifestFilePath))
+                            {
+                                using (var client = new HttpClient())
+                                {
+                                    var data = client
+                                        .GetByteArrayAsync(Settings.manifest_145)
+                                        .GetAwaiter()
+                                        .GetResult();
+                                    Directory.CreateDirectory(Path.GetDirectoryName(manifestFilePath));
+                                    File.WriteAllBytes(manifestFilePath, data);
+                                }
+                            }
+
+
+                            var psi = new ProcessStartInfo
+                            {
+                                FileName = Settings.ManfiestDL,
+                                Arguments = $"\"{manifestFilePath}\" -f {Settings.Character}.{kv.Key}.wad.client -o \"{VO_path}\"",
+                                UseShellExecute = false,
+                                CreateNoWindow = true
+                            };
+
+                            using (var process = Process.Start(psi))
+                            {
+                                process.WaitForExit();
+                            }
+                        }
+                        if (File.Exists(VO_wad))
+                        {
+                            x.LowerLog($"[FIXI] Fixing VO", CLR_ACT);
+                            var left = _wadExtractor.ExtractAndSwapReferences([VO_wad], kv.Value);
+                            if (left.Count != 0)
+                            {
+                                left = HashMaster.FindMatches(left);
+                                left = _wadExtractor.ExtractAndSwapReferences([VO_wad], kv.Value);
+                            }
+                            foreach (var tar in left)
+                            {
+                                x.LowerLog($"[FAIL] Failed to fill up {kv.Key} events {tar.OriginalPath}", CLR_ERR);
+                            }
+                        }
+                    }
+                }
+            }
+            var allPaths = new HashSet<string>(
+                    processing.Select(t => t.OriginalPath),
+                    StringComparer.OrdinalIgnoreCase
+                );
+
+            var bnkToWpkMap = new Dictionary<WadExtractor.Target, string>();
+
+
+            if (Settings.SoundOption == 0)
+            {
+                foreach (var target in processing
+                    .Where(t => t.OriginalPath.IndexOf("_vo_events.bnk", StringComparison.OrdinalIgnoreCase) >= 0)
+                    .ToList())
+                {
+                    var (ver, id) = _wadExtractor.CheckLanguageID(Settings.base_wad_path, target.OriginalPath);
+                    if (ver == 0)
+                    {
+                        processing.Remove(target);
+                        continue;
+                    }
+                    if (ver < Settings.bnk_version)
+                    {
+                        Event_bnk_lang.Add(target, id);
+
+                        string partnerWpk = Regex.Replace(
+                            target.OriginalPath,
+                            "_vo_events.bnk",
+                            "_vo_audio.wpk",
+                            RegexOptions.IgnoreCase
+                        );
+
+                        if (allPaths.Contains(partnerWpk, StringComparer.OrdinalIgnoreCase))
+                        {
+                            bnkToWpkMap.Add(target, partnerWpk);
+                        }
+
+                        processing.Remove(target);
+                    }
+                    else if (ver > Settings.bnk_version)
+                    {
+                        x.LowerLog("[INFO] UR APP NEED UPDATE BTW, DID U KNOW THAT?????", CLR_GOOD);
+                    }
+                }
+
+                if (!Settings.sfx_events)
+                {
+                    bool IsSfxEvents(WadExtractor.Target t) =>
+    t.OriginalPath.EndsWith("_sfx_events.bnk", StringComparison.OrdinalIgnoreCase);
+                    ToCheckup.AddRange(processing.Where(IsSfxEvents));
+                    processing.RemoveAll(IsSfxEvents);
+                }
+
+            }
+            else if (Settings.SoundOption == 2)
+            {
+                bool IsSound(WadExtractor.Target t)
+                {
+                    var ext = Path.GetExtension(t.OriginalPath);
+
+                    return string.Equals(ext, ".wpk", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(ext, ".bnk", StringComparison.OrdinalIgnoreCase);
+                }
+                ToCheckup.AddRange(processing.Where(IsSound));
+                processing.RemoveAll(IsSound);
+            }
+            else
+            {
+                foreach (var target in processing.Where(t => t.OriginalPath.IndexOf("_vo_events.bnk", StringComparison.OrdinalIgnoreCase) >= 0))
+                {
+                    var (ver, id) = _wadExtractor.CheckLanguageID(Settings.base_wad_path, target.OriginalPath);
+                    if (ver < Settings.bnk_version)
+                    {
+                        Event_bnk_lang.Add(target, id);
+                    }
+                }
+            }
+
+            if (Settings.AnimOption == 2)
+            {
+                bool IsANM(WadExtractor.Target t) =>
+    string.Equals(Path.GetExtension(t.OriginalPath), ".anm", StringComparison.OrdinalIgnoreCase);
+                ToCheckup.AddRange(processing.Where(IsANM));
+                processing.RemoveAll(IsANM);
+            }
+            // Use _wadExtractor instance
+            processing = _wadExtractor.ExtractAndSwapReferences(Settings.base_wad_path, processing);
+            if (processing.Count == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+
+            var remainingPaths = new HashSet<string>(
+                processing.Select(t => t.OriginalPath),
+                StringComparer.OrdinalIgnoreCase
+                );
+
+            if (Settings.binless)
+            {
+                x.LowerLog("[CHEK] Double checking files . . .", CLR_ACT);
+                processing = HashMaster.FindMatches(processing);
+                processing.RemoveAll(t =>
+                {
+                    if (t.Hashes.Count == 0)
+                    {
+                        return true;
+                    }
+                    return false;
+                });
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.base_wad_path, processing, CLR_MOD);
+                processing.Clear();
+                if (Settings.SoundOption != 2)
+                {
+                    foreach (var pair in bnkToWpkMap)
+                    {
+                        WadExtractor.Target bnkTarget = pair.Key;
+                        string wpkPath = pair.Value;
+
+                        if (!remainingPaths.Contains(wpkPath, StringComparer.OrdinalIgnoreCase))
+                        {
+                            processing.Add(bnkTarget);
+                        }
+                        else
+                        {
+                            if (!remainingPaths.Contains(wpkPath.Replace(".wpk", ".bnk"), StringComparer.OrdinalIgnoreCase))
+                            {
+                                processing.Add(bnkTarget);
+                            }
+                        }
+                    }
+                }
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, processing);
+                check_n_fix_vo();
+                return new List<WadExtractor.Target>();
+            }
+            if (Settings.SoundOption == 0)
+            {
+                bool IsSound(WadExtractor.Target t)
+                {
+                    var ext = Path.GetExtension(t.OriginalPath);
+
+                    return string.Equals(ext, ".wpk", StringComparison.OrdinalIgnoreCase) ||
+                           string.Equals(ext, ".bnk", StringComparison.OrdinalIgnoreCase);
+                }
+                ToCheckup.AddRange(processing.Where(IsSound));
+                processing.RemoveAll(IsSound);
+            }
+
+            if (Settings.AnimOption == 0)
+            {
+                bool IsANM(WadExtractor.Target t) =>
+    string.Equals(Path.GetExtension(t.OriginalPath), ".anm", StringComparison.OrdinalIgnoreCase);
+                ToCheckup.AddRange(processing.Where(IsANM));
+                processing.RemoveAll(IsANM);
+            }
+            if (!Settings.SmallMod)
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.OldLookUp, processing);
+            }
+            else
+            {
+                processing = _wadExtractor.FindAndSwapReferences(Settings.AllWadPaths, processing);
+            }
+            if (processing.Count() == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+            if (Settings.SoundOption == 0)
+            {
+
+                if (!Settings.SmallMod)
+                {
+                    foreach (var pair in bnkToWpkMap)
+                    {
+                        WadExtractor.Target bnkTarget = pair.Key;
+                        string wpkPath = pair.Value;
+
+                        if (!remainingPaths.Contains(wpkPath, StringComparer.OrdinalIgnoreCase))
+                        {
+                            processing.Add(bnkTarget);
+                        }
+                        else
+                        {
+                            if (!remainingPaths.Contains(wpkPath.Replace(".wpk", ".bnk"), StringComparer.OrdinalIgnoreCase))
+                            {
+                                processing.Add(bnkTarget);
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    List<WadExtractor.Target> bnk = new List<WadExtractor.Target>();
+                    foreach (var pair in bnkToWpkMap)
+                    {
+                        WadExtractor.Target bnkTarget = pair.Key;
+                        string wpkPath = pair.Value;
+
+                        if (!remainingPaths.Contains(wpkPath, StringComparer.OrdinalIgnoreCase))
+                        {
+                            bnk.Add(bnkTarget);
+                        }
+                        else
+                        {
+                            if (!remainingPaths.Contains(wpkPath.Replace(".wpk", ".bnk"), StringComparer.OrdinalIgnoreCase))
+                            {
+                                bnk.Add(bnkTarget);
+                            }
+                        }
+                    }
+                    var leftover = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, bnk);
+                    leftover = HashMaster.FindMatches(leftover);
+                    _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, leftover);
+                }
+            }
+
+            if (!Settings.SmallMod)
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, processing);
+            }
+            else
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.OldLookUp, processing);
+            }
+
+            if (processing.Count() == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+            // Use _hashes instance
+            processing = HashMaster.FindMatches(processing);
+
+            processing.RemoveAll(t =>
+            {
+                if (t.Hashes.Count == 0)
+                {
+                    return true;
+                }
+                return false;
+            });
+            processing = _wadExtractor.ExtractAndSwapReferences(Settings.base_wad_path, processing, CLR_MOD);
+            if (processing.Count() == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+            if (!Settings.SmallMod)
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.OldLookUp, processing);
+            }
+            else
+            {
+                processing = _wadExtractor.FindAndSwapReferences(Settings.AllWadPaths, processing);
+            }
+            if (processing.Count() == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+            if (!Settings.SmallMod)
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, processing);
+            }
+            else
+            {
+                processing = _wadExtractor.ExtractAndSwapReferences(Settings.OldLookUp, processing);
+            }
+            if (processing.Count() == 0)
+            {
+                check_n_fix_vo();
+                return processing;
+            }
+            foreach (var item in processing)
+            {
+                Settings.Missing_Files.Add(item.OriginalPath);
+            }
+
+            check_n_fix_vo();
+            return processing;
+        }
+
+        Bin LoadBin(string path)
+        {
+            if (File.Exists($"{Settings.inputDir}/{path}"))
+            {
+                var data = File.ReadAllBytes($"{Settings.inputDir}/{path}");
+                return new BinReader(data).Read();
+            }
+            else
+            {
+                string hashed = $"{HashMaster.HashPath(path).ToString("x16")}.bin";
+                if (!File.Exists($"{Settings.inputDir}/{hashed}")) return null;
+                var data = File.ReadAllBytes($"{Settings.inputDir}/{hashed}");
+                return new BinReader(data).Read();
+            }
+        }
+
+        List<string> CheckLinked(List<string> bins_to_check)
+        {
+            var bins_hashed = new List<WadExtractor.Target>();
+            foreach (string path in bins_to_check)
+            {
+                if (File.Exists($"{Settings.inputDir}/{path}")) continue;
+                string hashed = $"{HashMaster.HashPath(path).ToString("x16")}.bin";
+                if (File.Exists($"{Settings.inputDir}/{hashed}")) continue;
+
+                WadExtractor.Target found = bins_hashed.FirstOrDefault(t => t.OriginalPath == hashed);
+                if (found == null)
+                {
+                    List<string> hshs = new List<string>();
+                    hshs.Add(path);
+                    int count = path.Count(f => f == '/');
+                    if (count == 1 && path.Contains("_"))
+                    {
+                        string fname = path.Split('/')[1];
+                        string[] parts = fname.Split(new[] { '_' }, 2);
+                        string full = $"DATA/Characters/{fname.Split('_')[0]}/{parts[0]}_Multi_{parts[1]}";
+                        hshs.Add(full);
+                    }
+                    if (count == 3 && path.ToLower().Contains("_multi_"))
+                    {
+                        string fname = path.Split('/')[^1];
+                        string[] parts = fname.Split(new[] { '_' }, 3);
+                        string full = $"DATA/{parts[0]}_{parts[2]}";
+                        hshs.Add(full);
+                    }
+                    bins_hashed.Add(new WadExtractor.Target
+                    {
+                        Hashes = hshs,
+                        OutputPath = Settings.inputDir,
+                        OutputString = hashed,
+                        BinStringRef = null,
+                        OriginalPath = path,
+                    });
+                }
+            }
+            if (bins_hashed.Count() < 1) return null;
+            if (!Settings.binless)
+            {
+                bins_hashed = _wadExtractor.ExtractAndSwapReferences(Settings.base_wad_path, bins_hashed);
+                if (bins_hashed.Count() < 1) return null;
+
+                bins_hashed = _wadExtractor.ExtractAndSwapReferences(Settings.OldLookUp, bins_hashed);
+                if (bins_hashed.Count() < 1) return null;
+            }
+
+
+            bins_hashed = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, bins_hashed);
+            if (bins_hashed.Count() < 1) return null;
+            bins_hashed = HashMaster.FindMatches(bins_hashed, false);
+
+            bins_hashed.RemoveAll(t =>
+            {
+                if (t.Hashes.Count == 0)
+                {
+                    Console.WriteLine($"Missing CAC linked bin: {t.OriginalPath}");
+                    return true; // Remove this item
+                }
+                return false; // Keep this item
+            });
+            bins_hashed = _wadExtractor.ExtractAndSwapReferences(Settings.AllWadPaths, bins_hashed);
+            if (bins_hashed.Count() < 1) return null;
+            List<string> returning = new List<string>();
+            foreach (WadExtractor.Target tar in bins_hashed)
+            {
+                Settings.Missing_Bins.Add($"[Missing] {tar.OriginalPath}");
+                returning.Add(tar.OriginalPath);
+            }
+            return returning;
+        }
+
+        bool ShouldSkipFile(string path)
+        {
+            // data/characters/<folder>/<file>.bin
+            var dir = Path.GetDirectoryName(path);
+            if (dir == null)
+                return false;
+
+            var folder = Path.GetFileName(dir);
+            if (folder == null)
+                return false;
+
+            var parent = Path.GetFileName(Path.GetDirectoryName(dir));
+            if (parent is null || !parent.Equals("characters", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var grandParent = Path.GetFileName(
+                Path.GetDirectoryName(Path.GetDirectoryName(dir))
+            );
+            if (grandParent is null || !grandParent.Equals("data", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            var fileStem = Path.GetFileNameWithoutExtension(path);
+
+            return folder.Equals(fileStem, StringComparison.OrdinalIgnoreCase);
+        }
+
+        void repathIcon(string charbnin)
+        {
+            var notfound = CheckLinked([charbnin]);
+            if (notfound != null) return;
+
+            var bin = LoadBin(charbnin);
+            var Elements = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            if (bin.Sections.TryGetValue("entries", out BinValue entriesSection) && entriesSection is BinMap entriesMap)
+            {
+                foreach (var kvp in entriesMap.Items)
+                {
+                    var entryKey = (BinHash)kvp.Key;
+                    var entryData = (BinEmbed)kvp.Value;
+                    uint hash = entryKey.Value.Hash;
+
+                    if (hash == 0) continue;
+
+                    Elements[hash] = kvp;
+                }
+
+            }
+
+            var collectedIcons = new List<WadExtractor.Target>();
+            var collectedIconsFiles = new List<WadExtractor.TargetFile>();
+            Merge_files_into_string_target(collectedIcons, collectedIconsFiles);
+            foreach (var kvp in Elements.Values)
+            {
+                FindStringsRecursive(kvp.Value, collectedIcons, collectedIconsFiles);
+            }
+
+            collectedIcons.RemoveAll(target =>
+                 !target.OriginalPath.Contains("icons2d", StringComparison.OrdinalIgnoreCase));
+            if (Settings.Character.ToLower() == "samira")
+            {
+                List<string> ranks = ["assets/characters/samira/skins/base/particles/samira_p_meter_a.tex", "assets/characters/samira/skins/base/particles/samira_p_meter_b.tex",
+"assets/characters/samira/skins/base/particles/samira_p_meter_c.tex","assets/characters/samira/skins/base/particles/samira_p_meter_d.tex",
+"assets/characters/samira/skins/base/particles/samira_p_meter_s_plus_plus.tex","assets/characters/samira/skins/base/particles/samira_p_meter_s_plus.tex",
+"assets/characters/samira/skins/base/particles/samira_p_meter_s.tex", "assets/characters/samira/skins/base/particles/samira_base_p_max_style_rose.tex",
+"assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_1.tex", "assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_2.tex",
+"assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_3.tex", "assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_4.tex",
+"assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_5.tex", "assets/characters/samira/skins/skin30/particles/samira_skin30_z_stylemeter_letter_6.tex",];
+                foreach (string rank in ranks)
+                {
+                    collectedIcons.Add(new WadExtractor.Target { OriginalPath = rank, Hashes = [rank.Replace(".tex", ".dds"), rank], OutputPath = Settings.outputDir, OutputString = rank, BinStringRef = null });
+                }
+            }
+            foreach (var tar in collectedIcons)
+            {
+                tar.OutputString = tar.OriginalPath;
+                tar.BinStringRef = null;
+            }
+            _wadExtractor.ExtractAndSwapReferences(Settings.base_wad_path, collectedIcons, "#24bcbf");
+        }
+
+        (BinMap, BinMap, BinMap, List<WadExtractor.Target>, BinList) LoadAllBins(string rootBinPath)
+        {
+            var SkinDataEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var VFXEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var CACEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var RREntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var GearEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var StaticMatEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var AnimEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var GameplayEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+            var OtherEntries = new Dictionary<uint, KeyValuePair<BinValue, BinValue>>();
+
+            var collectedStrings = new List<WadExtractor.Target>();
+            var collectedFiles = new List<WadExtractor.TargetFile>();
+
+            var loaded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var loaded_linked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            loaded_linked.Add(rootBinPath);
+            var queue = new Queue<string>();
+
+            var linkedListtoReturn = new BinList(BinType.String);
+
+            queue.Enqueue(rootBinPath);
+            List<string> bins_to_check = new List<string>();
+
+            while (queue.Count > 0)
+            {
+                var path = queue.Dequeue();
+
+                if (loaded.Contains(path)) continue;
+
+                loaded.Add(path);
+                string trimmedPath = path.Length > 100
+    ? "…" + path[^99..]   // keep last 99 chars + ellipsis
+    : path;
+
+                x.UpperLog($"[READ] {trimmedPath}", CLR_ACT);
+
+                Bin bin = null;
+                try
+                {
+                    bin = LoadBin(path);
+                }
+                catch (Exception e)
+                {
+                    x.UpperLog($"[FAIL] Failed to read {trimmedPath}, {e}", CLR_ERR);
+                    Settings.Missing_Bins.Add($"[Read Error] {path}");
+                    continue;
+                }
+                if (bin == null) continue;
+
+                Console.WriteLine($"Loaded: {path}");
+
+                if (bin.Sections.TryGetValue("linked", out var linkedVal) && linkedVal is BinList linkedList)
+                {
+                    foreach (var item in linkedList.Items)
+                    {
+                        if (item is BinString s)
+                        {
+                            if (loaded_linked.Contains(s.Value)) continue;
+                            loaded_linked.Add(s.Value);
+
+                            if (!ShouldSkipFile(s.Value))
+                            {
+                                queue.Enqueue(s.Value);
+                                bins_to_check.Add(s.Value);
+                            }
+                            else
+                            {
+                                x.UpperLog($"[SKIP] {path}", CLR_WARN);
+                                if (Settings.keep_Icons) repathIcon(s.Value);
+                                linkedListtoReturn.Items.Add(s);
+                            }
+                        }
+                    }
+                }
+
+                if (bins_to_check.Count() > 0)
+                {
+                    var notfound = CheckLinked(bins_to_check);
+                    if (notfound != null)
+                    {
+                        foreach (string left in notfound)
+                        {
+                            // x.LowerLog($"[FAIL] Missing: {left}", CLR_ERR);
+                            linkedListtoReturn.Items.Add(new BinString(left));
+                        }
+                    }
+                    bins_to_check.Clear();
+                }
+                if (bin.Sections.TryGetValue("entries", out BinValue entriesSection) && entriesSection is BinMap entriesMap)
+                {
+                    foreach (var kvp in entriesMap.Items)
+                    {
+                        var entryKey = (BinHash)kvp.Key;
+                        var entryData = (BinEmbed)kvp.Value;
+                        uint hash = entryKey.Value.Hash;
+
+                        if (hash == 0) continue;
+                        Dictionary<uint, KeyValuePair<BinValue, BinValue>> targetDict;
+                        // bool override_older = true;
+                        switch ((Defi)entryData.Name.Hash)
+                        {
+                            case Defi.SkinCharacterDataProperties:
+                                targetDict = SkinDataEntries;
+                                break;
+
+                            case Defi.VfxSystemDefinitionData:
+                                targetDict = VFXEntries;
+                                break;
+
+                            case Defi.ContextualActionData:
+                                targetDict = CACEntries;
+                                break;
+
+                            case Defi.ResourceResolver:
+                                targetDict = RREntries;
+                                break;
+
+                            case Defi.GearSkinUpgrade:
+                                targetDict = GearEntries;
+                                break;
+                            case Defi.StaticMaterialDef:
+                                targetDict = StaticMatEntries;
+                                break;
+
+                            case Defi.AnimationGraphData:
+                                // override_older = false;
+                                targetDict = AnimEntries;
+                                break;
+
+                            case Defi.AbilityObject:
+                            case Defi.CharacterRecord:
+                            case Defi.SpellObject:
+                            case Defi.RecSpellRankUpInfolist:
+                            case Defi.ItemRecommendationContextList:
+                            case Defi.JunglePathRecommendation:
+                            case Defi.ItemRecommendationOverrideSet:
+                            case Defi.StatStoneSet:
+                            case Defi.StatStoneData:
+                                targetDict = GameplayEntries;
+                                break;
+
+                            default:
+                                targetDict = OtherEntries;
+                                break;
+                        }
+                        if (!targetDict.ContainsKey(hash))
+                        {
+                            targetDict[hash] = kvp;
+                        }
+                        // if (override_older)
+                        // {
+                        //     targetDict[hash] = kvp;
+                        // }
+                        // else
+                        // {
+                        //     if (!targetDict.ContainsKey(hash))
+                        //     {
+                        //         targetDict[hash] = kvp;
+                        //     }
+                        // }
+                    }
+
+
+                }
+            }
+            if (SkinDataEntries.Count > 1)
+            {
+                Validate(SkinDataEntries, [FNV1aHash($"Characters/{Settings.Character}/Skins/Skin{Settings.skinNo}")]);
+            }
+
+            if (SkinDataEntries.Count == 0)
+            {
+                x.LowerLog($"[MISS] SkinCharacterDataProperties", CLR_ERR);
+                return (null, null, null, null, null);
+            }
+            var mainEntry = (BinEmbed)SkinDataEntries.Values.First().Value;
+
+
+            if (GetField(mainEntry, 0x45ff5904) is BinEmbed skinMeshProps)
+            {
+                var submeshKey = new FNV1a(0xaad7612c, "Submesh");
+                var textureKey = new FNV1a(0x3c6468f4, "texture");
+
+                var materialOverrideVal = GetField(skinMeshProps, 0x24725910);
+
+                if (materialOverrideVal is BinList or BinList2)
+                {
+                    var items = materialOverrideVal is BinList bList ? bList.Items : ((BinList2)materialOverrideVal).Items;
+
+                    foreach (var item in items)
+                    {
+                        List<BinField>? fields = item switch
+                        {
+                            BinEmbed embed => embed.Items,
+                            BinPointer ptr => ptr.Items,
+                            _ => null
+                        };
+
+                        if (fields == null) continue;
+
+                        for (int i = 0; i < fields.Count; i++)
+                        {
+                            var field = fields[i];
+
+                            switch (field.Value)
+                            {
+                                case BinString strVal:
+                                    string raw = strVal.Value;
+                                    bool isTexturePath = raw.Contains('/');
+                                    if (isTexturePath)
+                                    {
+                                        field.Key = textureKey;
+
+                                        ulong pathHash = HashMaster.HashPath(raw);
+                                        HashMaster.AddTemporaryHashesAsync([raw]);
+                                        Settings.hash_table.Add(raw);
+
+                                        field.Value = new BinFile(new XXH64(pathHash, raw));
+                                    }
+                                    else
+                                    {
+                                        field.Key = submeshKey;
+                                    }
+                                    break;
+
+                                case BinHash hashVal:
+                                    // Convert existing 32-bit hash into 64-bit BinFile
+                                    field.Key = textureKey;
+                                    field.Value = new BinFile(new XXH64((ulong)hashVal.Value.Hash, hashVal.Value.String));
+                                    break;
+
+                                case BinFile:
+                                    // Already a file, ensure correct key
+                                    field.Key = textureKey;
+                                    break;
+                            }
+                        }
+                    }
+                }
+            }
+
+
+
+
+            BinValue? GetField(BinEmbed embed, uint hash)
+                => embed.Items.FirstOrDefault(f => f.Key.Hash == hash)?.Value;
+
+            uint CAC_name = (GetField(mainEntry, 0xd8f64a0d) as BinLink)?.Value.Hash ?? 0;
+            uint RR_name = FNV1aHash($"Characters/{Settings.Character}/Skins/Skin{Settings.skinNo}/Resources");
+            BinLink? rrLinkRef = GetField(mainEntry, 0x62286e7e) as BinLink;
+            if (rrLinkRef != null)
+            {
+                rrLinkRef.Value = new FNV1a(RR_name);
+            }
+
+            var GearUpgrades = new List<uint>();
+            uint anmgraph_name = 0;
+
+            if (GetField(mainEntry, 0x426d89a3) is BinEmbed subEmbed)
+            {
+                if (GetField(subEmbed, 0xf5fb07c7) is BinLink link)
+                {
+                    anmgraph_name = link.Value.Hash;
+                }
+            }
+
+            var materialEmbedVal = GetField(mainEntry, 0x68f2b69c);
+
+            if (materialEmbedVal is BinEmbed materialEmbed)
+            {
+                var materialListVal = GetField(materialEmbed, 0xcb522723);
+
+                if (materialListVal is BinList materialList)
+                {
+                    foreach (var item in materialList.Items)
+                    {
+                        if (item is BinLink linkItem)
+                        {
+                            GearUpgrades.Add(linkItem.Value.Hash);
+                        }
+                    }
+                }
+            }
+            List<string> ExtraCharactersToLoad = new List<string>();
+            var tagListField = GetField(mainEntry, 0x660c8b4e);
+            if (tagListField is BinList tagBinList)
+            {
+                foreach (var item in tagBinList.Items)
+                {
+                    if (item is BinString strVal)
+                    {
+                        ExtraCharactersToLoad.Add(strVal.Value);
+                    }
+                }
+            }
+            if (Settings.verifyHpBar)
+            {
+                var targetField = mainEntry.Items.FirstOrDefault(f => f.Key.Hash == 0x51c83af8);
+
+                if (targetField != null && targetField.Value is BinEmbed targetEmbed)
+                {
+                    var u8Field = targetEmbed.Items.FirstOrDefault(f => f.Key.Hash == 0x3fcb5693);
+
+                    if (u8Field != null && u8Field.Value is BinU8 valU8)
+                    {
+                        if (valU8.Value != (byte)Settings.HealthbarStyle)
+                        {
+                            valU8.Value = (byte)Settings.HealthbarStyle;
+                        }
+                    }
+                    else
+                    {
+                        targetEmbed.Items.Add(new BinField(new FNV1a(0x3fcb5693), new BinU8((byte)Settings.HealthbarStyle)));
+                    }
+                }
+                else
+                {
+                    // Console.WriteLine("Creating missing 0x51c83af8 element.");
+
+                    var newEmbed = new BinEmbed(new FNV1a(0x11b71b5e));
+
+                    newEmbed.Items.Add(new BinField(new FNV1a(0x4d5ff2d7), new BinString("Buffbone_Cstm_Healthbar")));
+                    newEmbed.Items.Add(new BinField(new FNV1a(0x3fcb5693), new BinU8((byte)Settings.HealthbarStyle)));
+
+                    mainEntry.Items.Add(new BinField(new FNV1a(0x51c83af8), newEmbed));
+                }
+            }
+
+
+            if (RREntries.Count > 1)
+            {
+                Validate(RREntries, [RR_name]);
+            }
+            if (CACEntries.Count > 1)
+            {
+                Validate(CACEntries, [CAC_name]);
+            }
+            if (AnimEntries.Count > 1)
+            {
+                Validate(AnimEntries, [anmgraph_name]);
+            }
+            if (Settings.verifyHpBar)
+            {
+                if (RREntries.Count == 0)
+                {
+                    x.LowerLog($"[MISS] Resource Resolver", CLR_ERR);
+                }
+                if (CACEntries.Count == 0)
+                {
+                    x.LowerLog($"[MISS] Contextual Action Data", CLR_ERR);
+                }
+                if (AnimEntries.Count == 0)
+                {
+                    x.LowerLog($"[MISS] Animations Definitions", CLR_ERR);
+                }
+            }
+            Validate(GearEntries, GearUpgrades);
+
+            var rrValues = new List<uint>();
+
+            if (RREntries.Count > 0)
+            {
+                var rrEntry = (BinEmbed)RREntries.Values.First().Value;
+
+                var mapField = rrEntry.Items.FirstOrDefault(f => f.Key.Hash == 0xd2f58721);
+
+                if (mapField != null && mapField.Value is BinMap rrMap)
+                {
+                    foreach (var kvp in rrMap.Items)
+                    {
+                        if (kvp.Value is BinLink linkVal)
+                        {
+                            if (linkVal.Value.Hash == 0) continue;
+                            rrValues.Add(linkVal.Value.Hash);
+                        }
+                    }
+                }
+            }
+            foreach (var kvp in GearEntries)
+            {
+                if (kvp.Value.Value is BinEmbed gearEmbed)
+                {
+                    var ptr1 = GetField(gearEmbed, 0x639b0013);
+                    if (ptr1 is BinPointer binPtr1)
+                    {
+                        var ptr2Field = binPtr1.Items.FirstOrDefault(f => f.Key.Hash == 0x5f8284a2);
+
+                        if (ptr2Field != null && ptr2Field.Value is BinPointer binPtr2)
+                        {
+                            var mapField = binPtr2.Items.FirstOrDefault(f => f.Key.Hash == 0xd2f58721);
+
+                            if (mapField != null && mapField.Value is BinMap gearMap)
+                            {
+                                foreach (var mapKvp in gearMap.Items)
+                                {
+                                    if (mapKvp.Value is BinLink linkVal)
+                                    {
+                                        rrValues.Add(linkVal.Value.Hash);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            Validate(VFXEntries, rrValues);
+
+            foreach (uint key in VFXEntries.Keys)
+            {
+                if (key != 0 && !rrValues.Contains(key))
+                {
+                    Settings.Missing_VFX.Add($"{key:x16}");
+                }
+            }
+
+            foreach (var entry in StaticMatEntries)
+            {
+                if (entry.Value.Value is BinEmbed materialEmbed2)
+                {
+                    var listField = materialEmbed2.Items.FirstOrDefault(f =>
+                        f.Key.Hash == 0x0a6f0eb5 || f.Key.Hash == 0xf3d3de85);
+
+                    if (listField != null)
+                    {
+                        // Use pattern matching to extract the Items regardless of which list type it is
+                        List<BinValue>? itemsToProcess = listField.Value switch
+                        {
+                            BinList2 l2 => l2.Items,
+                            BinList l1 => l1.Items,
+                            _ => null
+                        };
+
+                        if (itemsToProcess != null)
+                        {
+                            FNV1a textureKey = new FNV1a(0xf0a363e3, "TexturePath");
+                            FNV1a submeshKey = new FNV1a(0xb311d4ef, "TextureName");
+                            foreach (var listItem in itemsToProcess)
+                            {
+                                if (listItem is BinEmbed innerEmbed)
+                                {
+                                    foreach (var field in innerEmbed.Items)
+                                    {
+                                        switch (field.Value)
+                                        {
+                                            // Case 1: String value
+                                            case BinString strVal:
+                                                if (strVal.Value.Contains("/"))
+                                                {
+                                                    // Texture path -> Convert to BinFile using XXH64 hash
+                                                    field.Key = textureKey;
+
+                                                    // Replace with your actual HashMaster call/signature (returns ulong or XXH64)
+                                                    ulong pathHash = HashMaster.HashPath(strVal.Value);
+                                                    field.Value = new BinFile(new XXH64(pathHash));
+                                                    HashMaster.AddTemporaryHashesAsync([strVal.Value]);
+                                                    Settings.hash_table.Add(strVal.Value);
+                                                }
+                                                else
+                                                {
+                                                    // Non-path string -> Submesh name
+                                                    field.Key = submeshKey;
+                                                }
+                                                break;
+
+                                            // Case 2: Already a File (XXH64)
+                                            case BinFile fileVal:
+                                                field.Key = textureKey;
+                                                break;
+
+                                            // Case 3: In case it was parsed as a 32-bit BinHash previously
+                                            case BinHash hashVal:
+                                                field.Key = textureKey;
+                                                // If your file expects BinFile instead of BinHash, convert it:
+                                                field.Value = new BinFile(new XXH64((ulong)hashVal.Value.Hash, hashVal.Value.String));
+                                                break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    var techniquesField = materialEmbed2.Items.FirstOrDefault(f => f.Key.Hash == 0x844f384e);
+
+                    if (techniquesField?.Value is BinList techniquesList)
+                    {
+                        foreach (var techniqueItem in techniquesList.Items)
+                        {
+                            if (techniqueItem is BinEmbed techniqueEmbed)
+                            {
+                                // 2. Find the "passes" list inside the technique
+                                var passesField = techniqueEmbed.Items.FirstOrDefault(f => f.Key.Hash == 0x623cd25c);
+
+                                if (passesField?.Value is BinList passesList)
+                                {
+                                    foreach (var passItem in passesList.Items)
+                                    {
+                                        if (passItem is BinEmbed passEmbed)
+                                        {
+                                            // 3. Find the "shader" link inside the pass (Hash: 0x355d5568)
+                                            var shaderField = passEmbed.Items.FirstOrDefault(f => f.Key.Hash == 0x355d5568);
+
+                                            if (shaderField?.Value is BinLink shaderLink)
+                                            {
+                                                // Capture the struct
+                                                var fnv = shaderLink.Value;
+
+                                                // Calculate the new hash
+                                                uint originalHash = fnv.Hash;
+                                                var (newHash, oldName, newName) = GetShaderOrFallback(originalHash);
+
+                                                // Apply changes only if necessary
+                                                if (originalHash != newHash)
+                                                {
+                                                    fnv.Hash = newHash;
+                                                    fnv.String = null;
+
+                                                    shaderLink.Value = fnv;
+                                                    x.LowerLog($"[FIXD] Shader link {oldName} to {newName}", CLR_GOOD);
+                                                }
+                                                else
+                                                {
+                                                    x.LowerLog($"[GOOD] Shader link {oldName}", CLR_GOOD);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (Settings.FixiShape)
+            {
+                foreach (var entry in VFXEntries)
+                {
+                    // Ensure we are working with a BinEmbed (the root definition)
+                    if (entry.Value.Value is not BinEmbed vfxEmbed)
+                        continue;
+
+                    uint[] validHashes = { 0x6781e762, 0x868eb76a };
+
+                    // 1. Find the fields that contain the Emitter Lists (0x868eb76a, etc.)
+                    // The user's snippet iterated Items directly, but the data dump shows these are Lists.
+                    // We iterate the fields of the main Embed.
+                    foreach (var listField in vfxEmbed.Items.Where(f => validHashes.Contains(f.Key.Hash)).ToList())
+                    {
+                        //x.UpperLog($"Found valid list hash: 0x{listField.Key.Hash:x8}");
+
+                        // We expect the value to be a List of Pointers (The Emitters)
+                        if (listField.Value is not BinList binList) continue;
+
+                        // 2. Iterate through every Emitter in that list
+                        foreach (var emitterValue in binList.Items)
+                        {
+                            if (emitterValue is not BinPointer emitterPointer) continue;
+
+                            //x.UpperLog($"Processing Emitter Pointer: {emitterPointer.Name}");
+
+                            // 3. Find the Shape Attribute (0x9dc3d926) inside the Emitter
+                            var shapeField = emitterPointer.Items.FirstOrDefault(f => f.Key.Hash == 0x9dc3d926);
+
+                            if (shapeField == null) continue;
+
+                            // The shape is typically an Embed or Pointer containing data
+                            // We need to check if it has content.
+                            List<BinField>? shapeItems = null;
+                            if (shapeField.Value is BinEmbed shapeEmbed) shapeItems = shapeEmbed.Items;
+                            else if (shapeField.Value is BinPointer shapePtr) shapeItems = shapePtr.Items;
+
+                            if (shapeItems == null || shapeItems.Count == 0) continue;
+
+                            //x.UpperLog($"Found Shape Attribute 0x9dc3d926 with {shapeItems.Count} items.");
+
+                            // Initialize the "ShitDict" logic state
+                            bool emitRotationAnglesKeyValues = false;
+                            bool emitRotationAxesShit = false;
+                            bool flags = false;
+                            bool keepItAs0x4f4e2ed7 = false;
+
+                            float radiusVal = 0;
+                            float heightVal = 0;
+
+                            // We must iterate a Copy or use a for-loop because we might modify shapeItems inside
+                            for (int i = 0; i < shapeItems.Count; i++)
+                            {
+                                var insideOfShape = shapeItems[i];
+
+                                // --- Logic: 0xff7d0e41 (BirthTranslation handling) ---
+                                if (insideOfShape.Key.Hash == 0xff7d0e41)
+                                {
+                                    // Check contents of this inner structure
+                                    List<BinField>? innerItems = GetItemsFromBinValue(insideOfShape.Value);
+                                    if (innerItems != null)
+                                    {
+                                        var vec3Field = innerItems.FirstOrDefault(f => f.Key.Hash == 0xb4b427aa && f.Value.Type == BinType.Vec3);
+
+                                        if (vec3Field != null && vec3Field.Value is BinVec3 vec3Val)
+                                        {
+                                            //x.UpperLog("Moving BirthTranslation to Emitter parent.");
+
+                                            // Create new Embed for the Emitter
+                                            var birthTranslation = new BinEmbed(new FNV1a(0x68dc32b6)); // hash_type
+
+                                            // Add the vec3 to the new embed
+                                            birthTranslation.Items.Add(new BinField(vec3Field.Key, new BinVec3(vec3Val.Value)));
+
+                                            // Add this new field to the EMITTER (Parent of Shape)
+                                            // hash = 0x563d4a22
+                                            emitterPointer.Items.Add(new BinField(new FNV1a(0x563d4a22), birthTranslation));
+
+                                            // Clear the data of the current shape item (inside_of_shape.data = [])
+                                            if (insideOfShape.Value is BinEmbed innerEmbed) innerEmbed.Items.Clear();
+                                            else if (insideOfShape.Value is BinPointer innerPtr) innerPtr.Items.Clear();
+
+                                            // Python did a break here, implying specific handling for the first match
+                                            // logic usually continues to next shape item though.
+                                        }
+                                    }
+                                }
+
+                                // --- Logic: 0xe5f268dd (Extracting Radius/Height) ---
+                                else if (insideOfShape.Key.Hash == 0xe5f268dd)
+                                {
+                                    List<BinField>? innerItems = GetItemsFromBinValue(insideOfShape.Value);
+                                    if (innerItems != null)
+                                    {
+                                        foreach (var item in innerItems)
+                                        {
+                                            if (item.Key.Hash == 0xb4b427aa && item.Value is BinVec3 v3)
+                                            {
+                                                radiusVal = v3.Value.X;
+                                                heightVal = v3.Value.Y; // "lmao?"
+                                                //x.UpperLog($"Extracted Radius: {radiusVal}, Height: {heightVal}");
+                                            }
+                                            else if (item.Key.Hash == 0xbc037de7)
+                                            {
+                                                // Drill down: inside_of_emitoffset -> table_data -> shit -> smoll_shit
+                                                AnalyzeNestedTable(item.Value, ref flags, ref keepItAs0x4f4e2ed7);
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // --- Logic: 0x07f41838 ---
+                                else if (insideOfShape.Key.Hash == 0x07f41838)
+                                {
+                                    List<BinField>? innerItems = GetItemsFromBinValue(insideOfShape.Value);
+                                    if (innerItems != null)
+                                    {
+                                        foreach (var valFloat in innerItems)
+                                        {
+                                            // "for stuff in value_float.data" implies structure depth
+                                            List<BinField>? stuffItems = GetItemsFromBinValue(valFloat.Value);
+                                            if (stuffItems == null) continue;
+
+                                            foreach (var stuff in stuffItems)
+                                            {
+                                                if (stuff.Key.Hash == 0xbc037de7)
+                                                {
+                                                    AnalyzeNestedTableForRotation(stuff.Value, ref emitRotationAnglesKeyValues);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // --- Logic: 0xd1789c65 ---
+                                else if (insideOfShape.Key.Hash == 0xd1789c65)
+                                {
+                                    List<BinField>? innerItems = GetItemsFromBinValue(insideOfShape.Value);
+                                    // Looking for list length 2
+                                    // Python: list[vec3] = { { 0, 1, 0 } { 0, 0, 1 } }
+                                    // In Ritobin, a List BinValue works differently than Embed items.
+                                    // If `insideOfShape.Value` is a BinList:
+                                    if (insideOfShape.Value is BinList vecList && vecList.Items.Count == 2)
+                                    {
+                                        if (vecList.Items[0] is BinVec3 v1 && vecList.Items[1] is BinVec3 v2)
+                                        {
+                                            if ((int)v1.Value.Y == 1 && (int)v2.Value.Z == 1)
+                                            {
+                                                emitRotationAxesShit = true;
+                                                //x.UpperLog("EmitRotationAxesShit set to True");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            // --- Final Reconstruction Logic ---
+
+                            // Python: shape.hash = 0x3bf0b4ed (This actually changes the KEY of the field in the parent list)
+                            // But usually in these scripts, it implies transforming the Object Type Hash (Name).
+                            // However, looking at the result logic:
+                            // It constructs a new Object.
+
+                            if (!keepItAs0x4f4e2ed7 && emitRotationAnglesKeyValues && emitRotationAxesShit)
+                            {
+                                //x.UpperLog("Transforming Shape to 0x3dbe415d");
+
+                                // Create new Pointer
+                                var newPointer = new BinPointer(new FNV1a(0x3dbe415d)); // Hash Type
+
+                                // Add Radius (0x0dba4cb3)
+                                newPointer.Items.Add(new BinField(new FNV1a(0x0dba4cb3), new BinF32(radiusVal)));
+
+                                // Add Height (0xd5bdbb42) if exists (check logic: python says if shit_dict.get("Height"))
+                                // Note: heightVal is float, check if non-zero or logic requires specific check? 
+                                // Assuming non-zero based on generic extraction logic
+                                if (heightVal != 0)
+                                {
+                                    newPointer.Items.Add(new BinField(new FNV1a(0xd5bdbb42), new BinF32(heightVal)));
+                                }
+
+                                // Add Flags (0x9c677a2c)
+                                if (flags)
+                                {
+                                    newPointer.Items.Add(new BinField(new FNV1a(0x9c677a2c), new BinU8(1)));
+                                }
+
+                                // Update the Field Key and Value
+                                shapeField.Key = new FNV1a(0x3bf0b4ed);
+                                shapeField.Value = newPointer;
+                            }
+                            else
+                            {
+                                // Else logic
+                                // Check if shapeItems has 1 item, hash is 0xe5f268dd, and contains a Vector
+                                bool isSimpleVec3 = false;
+                                BinVec3? constantVec3 = null;
+
+                                if (shapeItems.Count == 1 && shapeItems[0].Key.Hash == 0xe5f268dd)
+                                {
+                                    // "isinstance(shape.data[0].data[0].data, Vector)"
+                                    // We need to check if the INNER item is a Vec3
+                                    List<BinField>? inner = GetItemsFromBinValue(shapeItems[0].Value);
+                                    if (inner != null && inner.Count > 0 && inner[0].Value is BinVec3 v3)
+                                    {
+                                        isSimpleVec3 = true;
+                                        constantVec3 = v3;
+                                    }
+                                }
+
+                                if (isSimpleVec3 && constantVec3 != null)
+                                {
+                                    //x.UpperLog("Transforming Shape to 0xee39916f (Simple Vec3)");
+
+                                    // Transform to Embed with type ee39916f
+                                    var newEmbed = new BinEmbed(new FNV1a(0xee39916f));
+
+                                    // Flatten: The field 0xe5f268dd now directly contains the vec3
+                                    newEmbed.Items.Add(new BinField(new FNV1a(0xe5f268dd), new BinVec3(constantVec3.Value)));
+
+                                    shapeField.Value = newEmbed;
+                                }
+                                else
+                                {
+                                    //x.UpperLog("Defaulting Shape to 0x4f4e2ed7");
+                                    // Default 0x4f4e2ed7
+                                    // In Ritobin, the "hash_type" is the Name of the Embed/Pointer
+                                    if (shapeField.Value is BinEmbed existingEmbed)
+                                    {
+                                        existingEmbed.Name = new FNV1a(0x4f4e2ed7);
+                                    }
+                                    else if (shapeField.Value is BinPointer existingPtr)
+                                    {
+                                        existingPtr.Name = new FNV1a(0x4f4e2ed7);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+
+
+            void ScanStrings(Dictionary<uint, KeyValuePair<BinValue, BinValue>> source)
+            {
+                foreach (var kvp in source.Values)
+                {
+                    FindStringsRecursive(kvp.Value, collectedStrings, collectedFiles);
+                }
+            }
+
+            ScanStrings(SkinDataEntries);
+            ScanStrings(RREntries);
+            ScanStrings(GearEntries);
+            ScanStrings(StaticMatEntries);
+            ScanStrings(VFXEntries);
+            ScanStrings(CACEntries);
+            ScanStrings(AnimEntries);
+            ScanStrings(OtherEntries);
+
+            Merge_files_into_string_target(collectedStrings, collectedFiles);
+
+            foreach (string characterToLoad in ExtraCharactersToLoad)
+            {
+                if (Settings.CharraBlackList_Lux.Contains(characterToLoad, StringComparer.OrdinalIgnoreCase) && Settings.skinNo != 7) continue;
+                if (!Settings.CharraBlackList.Contains(characterToLoad, StringComparer.OrdinalIgnoreCase)) Characters.Enqueue((characterToLoad, Settings.skinNo, false, ""));
+            }
+
+            var finalMap = new BinMap(BinType.Hash, BinType.Embed);
+            var finalMap2 = new BinMap(BinType.Hash, BinType.Embed);
+            var finalMap3 = new BinMap(BinType.Hash, BinType.Embed);
+
+            void MergeIntoFinal(Dictionary<uint, KeyValuePair<BinValue, BinValue>> source)
+            {
+                foreach (var kvp in source.Values)
+                {
+                    finalMap.Items.Add(kvp);
+                }
+            }
+            void MergeIntoFinal2(Dictionary<uint, KeyValuePair<BinValue, BinValue>> source)
+            {
+                foreach (var kvp in source.Values)
+                {
+                    finalMap2.Items.Add(kvp);
+                }
+            }
+            void MergeIntoFinal3(Dictionary<uint, KeyValuePair<BinValue, BinValue>> source)
+            {
+                foreach (var kvp in source.Values)
+                {
+                    finalMap3.Items.Add(kvp);
+                }
+            }
+
+            MergeIntoFinal(SkinDataEntries);
+            MergeIntoFinal(RREntries);
+            MergeIntoFinal2(GearEntries);
+            MergeIntoFinal3(StaticMatEntries);
+            MergeIntoFinal2(VFXEntries);
+            MergeIntoFinal2(CACEntries);
+            MergeIntoFinal2(AnimEntries);
+            MergeIntoFinal2(OtherEntries);
+
+            return (finalMap, finalMap2, finalMap3, collectedStrings, linkedListtoReturn);
+        }
+
+        private void Validate(Dictionary<uint, KeyValuePair<BinValue, BinValue>> RREntries, List<uint> RR_names)
+        {
+            foreach (var rr in RR_names)
+            {
+                if (!RREntries.ContainsKey(rr))
+                {
+                    // TODO: prompt user instead of throwing if desired
+                    // throw new InvalidOperationException($"Resource Resolver '{rr}' was not found.");
+                }
+            }
+
+            var keysToRemove = RREntries.Keys
+                .Where(k => !RR_names.Contains(k))
+                .ToList();
+
+            foreach (var key in keysToRemove)
+            {
+                RREntries.Remove(key);
+            }
+        }
+        private List<BinField>? GetItemsFromBinValue(BinValue value)
+        {
+            if (value is BinEmbed embed) return embed.Items;
+            if (value is BinPointer ptr) return ptr.Items;
+            return null; // Lists or primitives don't have BinField items directly
+        }
+
+        // "Drill down" logic for 0xbc037de7 -> 0xa7084719 -> smoll_shit
+        private void AnalyzeNestedTable(BinValue rootValue, ref bool flags, ref bool keepIt)
+        {
+            // rootValue is the 0xbc037de7 container
+            List<BinField>? tableData = GetItemsFromBinValue(rootValue);
+            if (tableData == null) return;
+
+            foreach (var td in tableData)
+            {
+                if (td.Key.Hash == 0xa7084719) // "list[pointer]" usually
+                {
+                    // The value here is likely a BinList containing items
+                    if (td.Value is BinList list)
+                    {
+                        foreach (var shit in list.Items)
+                        {
+                            List<BinField>? smollShits = GetItemsFromBinValue(shit);
+                            if (smollShits == null) continue;
+
+                            foreach (var smoll_shit in smollShits)
+                            {
+                                if (smoll_shit.Key.Hash == 0xe44b7382)
+                                {
+                                    // Check data: python expects list[f32]
+                                    if (smoll_shit.Value is BinList f32List && f32List.Items.Count >= 2)
+                                    {
+                                        float d0 = (f32List.Items[0] as BinF32)?.Value ?? -999;
+                                        float d1 = (f32List.Items[1] as BinF32)?.Value ?? -999;
+
+                                        if (d0 == 0 && d1 >= 1)
+                                        {
+                                            flags = true;
+                                            // x.UpperLog("Flags detected via nested table");
+                                        }
+                                        else if (d0 == -1 && d1 == 1)
+                                        {
+                                            keepIt = true;
+                                            // x.UpperLog("KeepItAs0x4f4e2ed7 detected via nested table");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        private void AnalyzeNestedTableForRotation(BinValue rootValue, ref bool emitRotation)
+        {
+            // rootValue is 0xbc037de7 container
+            List<BinField>? tableData = GetItemsFromBinValue(rootValue);
+            if (tableData == null) return;
+
+            foreach (var td in tableData)
+            {
+                if (td.Key.Hash == 0xa7084719)
+                {
+                    if (td.Value is BinList list)
+                    {
+                        foreach (var shit in list.Items)
+                        {
+                            List<BinField>? smollShits = GetItemsFromBinValue(shit);
+                            if (smollShits == null) continue;
+
+                            foreach (var smoll_shit in smollShits)
+                            {
+                                if (smoll_shit.Key.Hash == 0xe44b7382)
+                                {
+                                    if (smoll_shit.Value is BinList f32List && f32List.Items.Count >= 2)
+                                    {
+                                        float d0 = (f32List.Items[0] as BinF32)?.Value ?? -999;
+                                        float d1 = (f32List.Items[1] as BinF32)?.Value ?? -999;
+
+                                        if (d0 == 0 && d1 > 1)
+                                        {
+                                            emitRotation = true;
+                                            // x.UpperLog("EmitRotationAnglesKeyValues detected");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        public void Merge_files_into_string_target(List<WadExtractor.Target> results, List<WadExtractor.TargetFile> files)
+        {
+            HashMaster.ResolveTargetFilePathsAsync(files);
+            foreach (var file in files)
+            {
+                if (file.path is not null)
+                {
+                    string s = file.path;
+                    var string_out = s;
+                    if (!Settings.binless)
+                    {
+                        string_out = _pathFixer.FixPath(s);
+
+                    }
+                    var hashes = new List<string> { s };
+
+                    if (s.EndsWith(".tex", StringComparison.OrdinalIgnoreCase))
+                        hashes.Add(Path.ChangeExtension(s, ".dds"));
+                    if (s.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                        hashes.Add(Path.ChangeExtension(s, ".tex"));
+                    if (s.EndsWith(".sco", StringComparison.OrdinalIgnoreCase))
+                    {
+                        string_out.Replace(".sco", ".scb");
+                        hashes.Add(Path.ChangeExtension(s, ".scb"));
+                    }
+                    if (s.EndsWith(".scb", StringComparison.OrdinalIgnoreCase))
+                        hashes.Add(Path.ChangeExtension(s, ".sco"));
+
+                    if (s.ToLower() == "assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_2_slow.anm")
+                        hashes.Add("assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_2.anm");
+                    if (s.ToLower() == "assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_1_slow.anm")
+                        hashes.Add("assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_1.anm");
+
+#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
+                    WadExtractor.Target found = results.FirstOrDefault(t =>
+                    {
+                        // 1. Check for an exact match first
+                        if (string.Equals(t.OriginalPath, s, StringComparison.OrdinalIgnoreCase))
+                            return true;
+
+                        // 2. Check for interchangeable extensions (.dds <-> .tex)
+                        string ext = Path.GetExtension(s);
+                        if (string.Equals(ext, ".dds", StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(ext, ".tex", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string baseName = Path.ChangeExtension(s, null); // Get path without extension
+                            string targetExt = string.Equals(ext, ".dds", StringComparison.OrdinalIgnoreCase) ? ".tex" : ".dds";
+                            string alternativePath = baseName + targetExt;
+
+                            return string.Equals(t.OriginalPath, alternativePath, StringComparison.OrdinalIgnoreCase);
+                        }
+
+                        if (string.Equals(ext, ".sco", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string alternativePath = Path.ChangeExtension(s, "scb");
+
+                            return string.Equals(t.OriginalPath, alternativePath, StringComparison.OrdinalIgnoreCase);
+                        }
+                        return false;
+                    });
+#pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
+                    if (found != null)
+                    {
+                        // x.UpperLog($"{found.BinFileRef.Count}");
+                        // x.UpperLog($"{file.BinFileRef.Count}");
+                        // x.UpperLog($"---");
+                        found.BinFileRef.AddRange(file.BinFileRef);
+                    }
+                    else
+                    {
+                        results.Add(new WadExtractor.Target
+                        {
+                            BinFileRef = file.BinFileRef,
+                            OriginalPath = s,
+                            Hashes = hashes,
+                            OutputPath = Settings.outputDir,
+                            OutputString = string_out,
+                        });
+                    }
+                }
+                else
+                {
+                    string s = $"{file.hash:x16}";
+#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
+                    WadExtractor.Target found = results.FirstOrDefault(t =>
+                    {
+                        // 1. Check for an exact match first
+                        if (string.Equals(t.OriginalPath, s, StringComparison.OrdinalIgnoreCase))
+                            return true;
+                        return false;
+                    });
+#pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
+                    if (found != null)
+                    {
+                        found.BinFileRef.AddRange(file.BinFileRef);
+                    }
+                    else
+                    {
+                        results.Add(new WadExtractor.Target
+                        {
+                            BinFileRef = file.BinFileRef,
+                            OriginalPath = s,
+                            Hashes = [s],
+                            OutputPath = Settings.outputDir,
+                            OutputString = s,
+                        });
+                    }
+                }
+            }
+        }
+        public void FindStringsRecursive(BinValue value, List<WadExtractor.Target> results, List<WadExtractor.TargetFile> files)
+        {
+            if (value is null) return;
+
+            // Recursive Action helper
+            void Recurse(BinValue v) => FindStringsRecursive(v, results, files);
+
+            switch (value)
+            {
+                case BinString str:
+                    string s = str.Value;
+
+                    if (!string.IsNullOrWhiteSpace(s) && s.Contains('.') && s.Contains('/'))
+                    {
+                        var string_out = s;
+                        if (!Settings.binless)
+                        {
+                            string_out = _pathFixer.FixPath(s);
+
+                        }
+                        var hashes = new List<string> { s };
+
+                        if (s.EndsWith(".tex", StringComparison.OrdinalIgnoreCase))
+                            hashes.Add(Path.ChangeExtension(s, ".dds"));
+                        if (s.EndsWith(".dds", StringComparison.OrdinalIgnoreCase))
+                            hashes.Add(Path.ChangeExtension(s, ".tex"));
+                        if (s.EndsWith(".sco", StringComparison.OrdinalIgnoreCase))
+                        {
+                            string_out.Replace(".sco", ".scb");
+                            hashes.Add(Path.ChangeExtension(s, ".scb"));
+                        }
+                        if (s.EndsWith(".scb", StringComparison.OrdinalIgnoreCase))
+                            hashes.Add(Path.ChangeExtension(s, ".sco"));
+
+                        if (s.ToLower() == "assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_2_slow.anm")
+                            hashes.Add("assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_2.anm");
+                        if (s.ToLower() == "assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_1_slow.anm")
+                            hashes.Add("assets/characters/taliyah/skins/base/particles/taliyah_base_e_stone_mine_1.anm");
+
+#pragma warning disable CS8600 // Converting null literal or possible null value to non-nullable type.
+                        WadExtractor.Target found = results.FirstOrDefault(t =>
+                        {
+                            // 1. Check for an exact match first
+                            if (string.Equals(t.OriginalPath, s, StringComparison.OrdinalIgnoreCase))
+                                return true;
+
+                            // 2. Check for interchangeable extensions (.dds <-> .tex)
+                            string ext = Path.GetExtension(s);
+                            if (string.Equals(ext, ".dds", StringComparison.OrdinalIgnoreCase) ||
+                                string.Equals(ext, ".tex", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string baseName = Path.ChangeExtension(s, null); // Get path without extension
+                                string targetExt = string.Equals(ext, ".dds", StringComparison.OrdinalIgnoreCase) ? ".tex" : ".dds";
+                                string alternativePath = baseName + targetExt;
+
+                                return string.Equals(t.OriginalPath, alternativePath, StringComparison.OrdinalIgnoreCase);
+                            }
+
+                            if (string.Equals(ext, ".sco", StringComparison.OrdinalIgnoreCase))
+                            {
+                                string alternativePath = Path.ChangeExtension(s, "scb");
+
+                                return string.Equals(t.OriginalPath, alternativePath, StringComparison.OrdinalIgnoreCase);
+                            }
+
+                            return false;
+                        });
+#pragma warning restore CS8600 // Converting null literal or possible null value to non-nullable type.
+                        if (found != null)
+                        {
+                            found.BinStringRef.Add(str);
+                        }
+                        else
+                        {
+                            results.Add(new WadExtractor.Target
+                            {
+                                BinStringRef = [str],
+                                OriginalPath = s,
+                                Hashes = hashes,
+                                OutputPath = Settings.outputDir,
+                                OutputString = string_out,
+                            });
+                        }
+
+                    }
+                    break;
+
+                // --- BinFile Handling ---
+                case BinFile fileNode when fileNode.Value.Hash != 0:
+                    ulong hash = fileNode.Value.Hash;
+                    WadExtractor.TargetFile? existingFile = results.OfType<WadExtractor.TargetFile>().FirstOrDefault(t => t.hash == hash);
+
+                    if (existingFile != null)
+                    {
+                        existingFile.BinFileRef?.Add(fileNode);
+                    }
+                    else
+                    {
+                        files.Add(new WadExtractor.TargetFile
+                        {
+                            BinFileRef = [fileNode],
+                            hash = hash
+                        });
+                    }
+                    break;
+
+
+                // --- Container Traversal ---
+                case BinEmbed embed:
+                    foreach (var f in embed.Items) Recurse(f.Value);
+                    break;
+
+                case BinPointer ptr:
+                    foreach (var f in ptr.Items) Recurse(f.Value);
+                    break;
+
+                case BinList list:
+                    foreach (var item in list.Items) Recurse(item);
+                    break;
+
+                case BinList2 list2:
+                    foreach (var item in list2.Items) Recurse(item);
+                    break;
+
+                case BinOption opt:
+                    foreach (var item in opt.Items) Recurse(item);
+                    break;
+
+                case BinMap map:
+                    foreach (var kvp in map.Items)
+                    {
+                        Recurse(kvp.Key);
+                        Recurse(kvp.Value);
+                    }
+                    break;
+            }
+        }
+
+        public List<string> CollectWads(string rootFolder)
+        {
+            // Ensure we have a valid string to search for to avoid null reference exceptions
+            var searchToken = Settings.Character ?? string.Empty;
+
+            return Directory
+                .EnumerateFiles(rootFolder, "*.wad.client", SearchOption.AllDirectories)
+                .Select(Path.GetFullPath)
+                .OrderBy(path =>
+                {
+                    var fileName = Path.GetFileName(path);
+
+                    // If the filename contains the character name, return 0 (top priority).
+                    // Otherwise, return 1 (bottom priority).
+                    return fileName.Contains(searchToken, StringComparison.OrdinalIgnoreCase)
+                        ? 0
+                        : 1;
+                })
+                // Optional: Add a secondary sort (e.g., alphabetical) to keep the list stable
+                .ThenBy(path => path)
+                .ToList();
+        }
+
+        public static List<string> bonusPaths = [];
+        public class WadExtractor
+        {
+            private FixerSettings _settings;
+            public IFixerLogger x;
+
+            // Reusing log colors from parent
+            private const string CLR_ACT = "#2a84d2";
+            private const string CLR_GOOD = "#2dc55e";
+            private const string CLR_MOD = "#5350b9";
+
+
+            public WadExtractor(FixerSettings settings)
+            {
+                _settings = settings;
+            }
+
+            public List<int> GetAvailableSkinNumbers(List<string> wadPaths, string character)
+            {
+                var foundSkins = new HashSet<int>();
+                var skinHashes = new Dictionary<ulong, int>();
+
+                // Pre-calculate hashes for WAD file lookups
+                for (int i = 0; i < 100; i++)
+                {
+                    string path = $"data/characters/{character}/skins/skin{i}.bin";
+                    skinHashes[HashMaster.HashPath(path)] = i;
+                }
+
+                byte[] entryBuffer = new byte[32];
+
+                foreach (var wadPath in wadPaths)
+                {
+                    // --- NEW LOGIC START ---
+                    // If the path is a directory, check for loose files
+                    if (Directory.Exists(wadPath))
+                    {
+                        for (int i = 0; i < 100; i++)
+                        {
+                            // Reconstruct the internal path structure
+                            string relativePath = $"data/characters/{character}/skins/skin{i}.bin";
+
+                            // Combine the directory with the relative path
+                            string fullPath = Path.Combine(wadPath, relativePath);
+
+                            if (File.Exists(fullPath))
+                            {
+                                foundSkins.Add(i);
+                                continue;
+                            }
+
+                            relativePath = $"{HashMaster.HashPath(relativePath):8}.bin";
+
+                            // Combine the directory with the relative path
+                            fullPath = Path.Combine(wadPath, relativePath);
+
+                            if (File.Exists(fullPath))
+                            {
+                                foundSkins.Add(i);
+                            }
+                        }
+                        continue; // Skip the WAD reading logic for this iteration
+                    }
+                    // --- NEW LOGIC END ---
+
+                    // Existing logic for .wad files
+                    if (!File.Exists(wadPath)) continue;
+
+                    using (var fs = new FileStream(wadPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length < 272) continue;
+                        fs.Seek(268, SeekOrigin.Begin);
+                        uint fileCount = br.ReadUInt32();
+
+                        for (int i = 0; i < fileCount; i++)
+                        {
+                            if (fs.Read(entryBuffer, 0, 32) != 32) break;
+                            ulong pathHash = BitConverter.ToUInt64(entryBuffer, 0);
+
+                            if (skinHashes.TryGetValue(pathHash, out int skinNo))
+                            {
+                                foundSkins.Add(skinNo);
+                            }
+                        }
+                    }
+                }
+
+                var result = foundSkins.ToList();
+                result.Sort();
+                return result;
+            }
+            struct WadEntryInfo
+            {
+                public string FilePath;
+                public ulong PathHash;
+                public ulong DataChecksum;
+                public uint Size;
+                public uint UncompressedSize;
+                public byte CompressionType;
+            }
+
+            // public void PackDirectoryToWad(string sourceDirectory, string outputWadPath)
+            // {
+            //     if (!Directory.Exists(sourceDirectory))
+            //         throw new DirectoryNotFoundException($"Source directory not found: {sourceDirectory}");
+            // 
+            //     string outputDir = Path.GetDirectoryName(outputWadPath);
+            //     if (!string.IsNullOrEmpty(outputDir) && !Directory.Exists(outputDir)) Directory.CreateDirectory(outputDir);
+            // 
+            //     var files = Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories);
+            //     var entries = new WadEntryInfo[files.Length];
+            // 
+            //     var tempPaths = new ConcurrentBag<string>();
+            // 
+            //     Parallel.For(0, files.Length, i =>
+            //     {
+            //         string file = files[i];
+            //         string relativePath = Path.GetRelativePath(sourceDirectory, file);
+            //         string wadPath = relativePath.Replace('\\', '/').ToLowerInvariant();
+            //         tempPaths.Add(wadPath);
+            //         byte[] fileBytes = File.ReadAllBytes(file);
+            // 
+            //         // --- Start of Modified Logic ---
+            //         ulong pathHash;
+            // 
+            //         // Check if the file is directly in the root (no directory separators in the relative path)
+            //         bool isRootFile = !relativePath.Contains(Path.DirectorySeparatorChar)
+            //                           && !relativePath.Contains(Path.AltDirectorySeparatorChar);
+            // 
+            //         if (isRootFile)
+            //         {
+            //             // Try to parse the filename (without extension) as a hex string
+            //             string filenameNoExt = Path.GetFileNameWithoutExtension(file);
+            // 
+            //             // Allow HexNumber format. "a5ed..." needs to be parsed as ulong.
+            //             if (ulong.TryParse(filenameNoExt, System.Globalization.NumberStyles.HexNumber, null, out ulong manualHash))
+            //             {
+            //                 pathHash = manualHash;
+            //             }
+            //             else
+            //             {
+            //                 // Root file, but not a valid hash name -> Hash the path normally
+            //                 pathHash = HashMaster.HashPath(wadPath);
+            //                 HashMaster.AddTemporaryHashesAsync([wadPath]).GetAwaiter();
+            //             }
+            //         }
+            //         else
+            //         {
+            //             // File is in a subdirectory -> Hash the path normally
+            //             pathHash = HashMaster.HashPath(wadPath);
+            //             HashMaster.AddTemporaryHashesAsync([wadPath]).GetAwaiter();
+            //         }
+            //         // --- End of Modified Logic ---
+            // 
+            //         entries[i] = new WadEntryInfo
+            //         {
+            //             FilePath = file,
+            //             PathHash = pathHash,
+            //             DataChecksum = BitConverter.ToUInt64(XxHash64.Hash(fileBytes)),
+            //             Size = (uint)fileBytes.Length
+            //         };
+            //     });
+            // 
+            //     // Assuming bonusPaths is defined in the class scope as per your original snippet
+            //     bonusPaths.AddRange(tempPaths);
+            // 
+            //     Array.Sort(entries, (a, b) => a.PathHash.CompareTo(b.PathHash));
+            //     ulong tocChecksum = 0;
+            //     foreach (var e in entries) tocChecksum ^= e.DataChecksum;
+            // 
+            //     using (var fs = new FileStream(outputWadPath, FileMode.Create, FileAccess.Write))
+            //     using (var bw = new BinaryWriter(fs))
+            //     {
+            //         bw.Write(new char[] { 'R', 'W' });
+            //         bw.Write((byte)3);
+            //         bw.Write((byte)4);
+            //         bw.Write(new byte[256]);
+            //         bw.Write(tocChecksum);
+            //         bw.Write((uint)entries.Length);
+            // 
+            //         uint dataStartOffset = 272 + ((uint)entries.Length * 32);
+            //         uint absoluteOffset = dataStartOffset;
+            // 
+            //         foreach (var entry in entries)
+            //         {
+            //             bw.Write(entry.PathHash);
+            //             bw.Write(absoluteOffset);
+            //             bw.Write(entry.Size);
+            //             bw.Write(entry.Size);
+            //             bw.Write((byte)0);
+            //             bw.Write((byte)0);
+            //             bw.Write((ushort)0);
+            //             bw.Write(entry.DataChecksum);
+            // 
+            //             absoluteOffset += entry.Size;
+            //         }
+            // 
+            //         byte[] copyBuffer = new byte[81920];
+            //         foreach (var entry in entries)
+            //         {
+            //             using (var inputFile = new FileStream(entry.FilePath, FileMode.Open, FileAccess.Read))
+            //             {
+            //                 int bytesRead;
+            //                 while ((bytesRead = inputFile.Read(copyBuffer, 0, copyBuffer.Length)) > 0)
+            //                 {
+            //                     bw.Write(copyBuffer, 0, bytesRead);
+            //                 }
+            //             }
+            //         }
+            //     }
+            // }
+
+            public void CreateTopazMap(string sourceDirectory)
+            {
+                if (!Directory.Exists(sourceDirectory))
+                    throw new DirectoryNotFoundException($"Source directory not found: {sourceDirectory}");
+
+                string mapFilePath = Path.Combine(sourceDirectory, "topaz.map");
+
+                // 1. Gather files excluding any existing map file
+                var files = Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+                                     .Where(f => !Path.GetFileName(f).Equals("topaz.map", StringComparison.OrdinalIgnoreCase))
+                                     .ToArray();
+
+                int count = files.Length;
+                var entries = new (ulong Hash, byte[] Utf8Path, string WadPath)[count];
+
+                // 2. Parallel processing: compute hashes and encode UTF8 once
+                Parallel.For(0, count, i =>
+                {
+                    string file = files[i];
+                    string relativePath = Path.GetRelativePath(sourceDirectory, file);
+                    string wadPath = relativePath.Replace('\\', '/').ToLowerInvariant();
+
+                    ulong pathHash;
+                    bool isRootFile = !relativePath.Contains(Path.DirectorySeparatorChar)
+                                      && !relativePath.Contains(Path.AltDirectorySeparatorChar);
+
+                    if (isRootFile && ulong.TryParse(Path.GetFileNameWithoutExtension(file),
+                                                     System.Globalization.NumberStyles.HexNumber,
+                                                     null, out ulong manualHash))
+                    {
+                        pathHash = manualHash;
+                    }
+                    else
+                    {
+                        pathHash = HashMaster.HashPath(wadPath);
+                    }
+
+                    byte[] utf8Bytes = Encoding.UTF8.GetBytes(wadPath);
+                    entries[i] = (pathHash, utf8Bytes, wadPath);
+                });
+
+                // Populate bonus paths & notify hashes
+                bonusPaths.AddRange(entries.Select(e => e.WadPath));
+                _ = HashMaster.AddTemporaryHashesAsync(entries.Select(e => e.WadPath).ToArray());
+
+                // 3. Sort by hash ascending for binary search
+                Array.Sort(entries, (a, b) => a.Hash.CompareTo(b.Hash));
+
+                // 4. Calculate table layout directly (No seeking back required!)
+                const int headerSize = 16;
+                const int recordSize = 16;
+                long stringTableOffset = headerSize + ((long)count * recordSize);
+
+                // 5. High-speed sequential write with 64KB buffer
+                using var fs = new FileStream(mapFilePath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, FileOptions.SequentialScan);
+
+                // Header: [Magic: 4B][Count: 4B][StringTableOffset: 8B]
+                Span<byte> header = stackalloc byte[headerSize];
+                header[0] = (byte)'T';
+                header[1] = (byte)'P';
+                header[2] = (byte)'Z';
+                header[3] = (byte)'M';
+                BinaryPrimitives.WriteUInt32LittleEndian(header.Slice(4, 4), (uint)count);
+                BinaryPrimitives.WriteUInt64LittleEndian(header.Slice(8, 8), (ulong)stringTableOffset);
+                fs.Write(header);
+
+                // Stream 1: Index Records (16 bytes each)
+                // [Hash: 8B][StringOffset: 4B][Length: 2B][Padding: 2B]
+                Span<byte> record = stackalloc byte[recordSize];
+                uint runningStringOffset = 0;
+
+                for (int i = 0; i < count; i++)
+                {
+                    ushort strLen = (ushort)entries[i].Utf8Path.Length;
+
+                    BinaryPrimitives.WriteUInt64LittleEndian(record.Slice(0, 8), entries[i].Hash);
+                    BinaryPrimitives.WriteUInt32LittleEndian(record.Slice(8, 4), runningStringOffset);
+                    BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(12, 2), strLen);
+                    BinaryPrimitives.WriteUInt16LittleEndian(record.Slice(14, 2), 0); // Reserved / alignment
+
+                    fs.Write(record);
+                    runningStringOffset += strLen;
+                }
+
+                // Stream 2: String Pool
+                for (int i = 0; i < count; i++)
+                {
+                    fs.Write(entries[i].Utf8Path);
+                }
+
+                fs.Flush();
+            }
+            public void ExtractAndLoadTemporaryHashes(List<string> wadPaths)
+            {
+                if (wadPaths == null || wadPaths.Count == 0) return;
+
+                var targetFileNames = new List<string> { "hashes.harvested.txt", "hashes.game.txt", "files.txt", "hashes.txt" };
+
+                var targetHashes = new HashSet<ulong>();
+                foreach (var target in targetFileNames)
+                {
+                    targetHashes.Add(HashMaster.HashPath(target));
+                }
+
+                byte[] entryBuffer = new byte[32];
+
+                foreach (var wadPath in wadPaths)
+                {
+                    // 1. Directory scan / topaz.map handler
+                    if (Directory.Exists(wadPath))
+                    {
+                        string mapFilePath = Path.Combine(wadPath, "topaz.map");
+
+                        if (File.Exists(mapFilePath))
+                        {
+                            // Find and load target files directly from disk via topaz.map lookup
+                            foreach (ulong targetHash in targetHashes)
+                            {
+                                string? relativePath = FindPathInTopazMap(mapFilePath, targetHash);
+                                if (string.IsNullOrEmpty(relativePath)) continue;
+
+                                // Support cross-platform path separators
+                                string physicalPath = Path.Combine(wadPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+
+                                if (File.Exists(physicalPath))
+                                {
+                                    HashMaster.AddTemporaryHashesFromFileAsync(physicalPath).GetAwaiter().GetResult();
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Fallback: Check for loose target files directly in root
+                            foreach (var targetName in targetFileNames)
+                            {
+                                string loosePath = Path.Combine(wadPath, targetName);
+                                if (File.Exists(loosePath))
+                                {
+                                    HashMaster.AddTemporaryHashesFromFileAsync(loosePath).GetAwaiter().GetResult();
+                                }
+                            }
+                        }
+                        continue;
+                    }
+
+                    // 2. WAD archive scan (original logic)
+                    if (!File.Exists(wadPath)) continue;
+
+                    using (var fs = new FileStream(wadPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length < 272) continue;
+
+                        fs.Seek(268, SeekOrigin.Begin);
+                        uint fileCount = br.ReadUInt32();
+
+                        for (int i = 0; i < fileCount; i++)
+                        {
+                            if (fs.Read(entryBuffer, 0, 32) != 32) break;
+
+                            ulong pathHash = BitConverter.ToUInt64(entryBuffer, 0);
+
+                            if (targetHashes.Contains(pathHash))
+                            {
+                                uint offset = BitConverter.ToUInt32(entryBuffer, 8);
+                                uint compressedSize = BitConverter.ToUInt32(entryBuffer, 12);
+                                byte type = (byte)(entryBuffer[20] & 0x0F);
+
+                                long savedTocPosition = fs.Position;
+
+                                fs.Seek(offset, SeekOrigin.Begin);
+                                byte[] fileData = new byte[compressedSize];
+                                if (fs.Read(fileData, 0, (int)compressedSize) != compressedSize)
+                                {
+                                    fs.Seek(savedTocPosition, SeekOrigin.Begin);
+                                    continue;
+                                }
+
+                                // Decompress payload
+                                byte[] rawData;
+                                var rawSpan = new ReadOnlySpan<byte>(fileData);
+
+                                if (IsZstd(rawSpan) || type == 3)
+                                {
+                                    try { rawData = DecompressZstd(fileData, fileData.Length); }
+                                    catch { rawData = fileData; }
+                                }
+                                else if (IsGzip(rawSpan) || type == 1)
+                                {
+                                    try { rawData = DecompressGzip(fileData, fileData.Length); }
+                                    catch { rawData = fileData; }
+                                }
+                                else
+                                {
+                                    rawData = fileData;
+                                }
+
+                                try
+                                {
+                                    using var stream = new MemoryStream(rawData);
+                                    using var reader = new StreamReader(stream, Encoding.UTF8);
+
+                                    string? firstLine = reader.ReadLine();
+                                    string? firstToken = firstLine?.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+
+                                    bool scheme = ulong.TryParse(
+                                        firstToken?.Replace("0x", "", StringComparison.OrdinalIgnoreCase).Trim(),
+                                        NumberStyles.HexNumber,
+                                        CultureInfo.InvariantCulture,
+                                        out _);
+
+                                    if (scheme)
+                                    {
+                                        string[] parts = firstLine.Split(' ', 2);
+                                        string remaining = parts.Length > 1 ? parts[1] : string.Empty;
+                                        _settings.hash_table.Add(remaining);
+                                    }
+                                    else
+                                    {
+                                        _settings.hash_table.Add(firstLine);
+                                    }
+
+                                    string? line;
+                                    if (scheme)
+                                    {
+                                        while ((line = reader.ReadLine()) != null)
+                                        {
+                                            if (string.IsNullOrWhiteSpace(line)) continue;
+                                            string[] parts = line.Split(' ', 2);
+                                            string remaining = parts.Length > 1 ? parts[1] : string.Empty;
+                                            _settings.hash_table.Add(remaining);
+                                        }
+                                    }
+                                    else
+                                    {
+                                        while ((line = reader.ReadLine()) != null)
+                                        {
+                                            if (string.IsNullOrWhiteSpace(line)) continue;
+                                            _settings.hash_table.Add(line);
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    HashMaster.AddTemporaryHashesAsync(_settings.hash_table).GetAwaiter().GetResult();
+                                }
+
+                                // Restore position in TOC table
+                                fs.Seek(savedTocPosition, SeekOrigin.Begin);
+                            }
+                        }
+                    }
+                }
+            }
+
+            private static string? FindPathInTopazMap(string mapFilePath, ulong targetHash)
+            {
+                // 1. Open handle directly - bypasses FileStream overhead entirely
+                using SafeFileHandle handle = File.OpenHandle(mapFilePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+
+                long fileLength = RandomAccess.GetLength(handle);
+                const int headerSize = 16;
+                const int recordSize = 16;
+
+                if (fileLength < headerSize) return null;
+
+                Span<byte> header = stackalloc byte[headerSize];
+                RandomAccess.Read(handle, header, 0);
+
+                // Validate 4-byte magic "TPZM"
+                if (header[0] != 'T' || header[1] != 'P' || header[2] != 'Z' || header[3] != 'M')
+                    return null;
+
+                uint count = BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(4));
+                if (count == 0) return null;
+
+                long stringTableOffset = (long)BinaryPrimitives.ReadUInt64LittleEndian(header.Slice(8));
+                long recordBlockSize = (long)count * recordSize;
+
+                if (fileLength < headerSize + recordBlockSize || stringTableOffset < headerSize + recordBlockSize)
+                    return null;
+
+                long low = 0;
+                long high = count - 1;
+                Span<byte> recordBuffer = stackalloc byte[recordSize];
+
+                while (low <= high)
+                {
+                    long mid = low + ((high - low) / 2);
+                    long targetOffset = headerSize + (mid * recordSize);
+
+                    // 2. Read exact byte offsets from OS without mutating a stream position
+                    RandomAccess.Read(handle, recordBuffer, targetOffset);
+
+                    ulong currentHash = BinaryPrimitives.ReadUInt64LittleEndian(recordBuffer);
+
+                    if (currentHash == targetHash)
+                    {
+                        uint stringOffset = BinaryPrimitives.ReadUInt32LittleEndian(recordBuffer.Slice(8));
+                        ushort stringLength = BinaryPrimitives.ReadUInt16LittleEndian(recordBuffer.Slice(12));
+
+                        long finalStrPos = stringTableOffset + stringOffset;
+                        if (finalStrPos + stringLength > fileLength) return null;
+
+                        // 3. Prevent heap allocation for normal-sized file paths (under 512 bytes)
+                        Span<byte> stringBytes = stringLength <= 512
+                            ? stackalloc byte[stringLength]
+                            : new byte[stringLength];
+
+                        RandomAccess.Read(handle, stringBytes, finalStrPos);
+                        return Encoding.UTF8.GetString(stringBytes);
+                    }
+
+                    if (currentHash < targetHash)
+                        low = mid + 1;
+                    else
+                        high = mid - 1;
+                }
+
+                return null;
+            }
+
+            public (uint version, uint id) CheckLanguageID(List<string> wadPaths, string target)
+            {
+                ulong targetHash = HashMaster.HashPath(target);
+                byte[] entryBuffer = new byte[32];
+
+                foreach (var wadPath in wadPaths)
+                {
+                    if (!File.Exists(wadPath)) continue;
+
+                    using (var fs = new FileStream(wadPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length < 272) continue;
+
+                        // Read File Count
+                        fs.Seek(268, SeekOrigin.Begin);
+                        uint fileCount = br.ReadUInt32();
+
+                        for (int i = 0; i < fileCount; i++)
+                        {
+                            if (fs.Read(entryBuffer, 0, 32) != 32) break;
+
+                            ulong pathHash = BitConverter.ToUInt64(entryBuffer, 0);
+
+                            if (pathHash == targetHash)
+                            {
+                                // Found the specific file entry
+                                uint offset = BitConverter.ToUInt32(entryBuffer, 8);
+                                uint compressedSize = BitConverter.ToUInt32(entryBuffer, 12);
+                                byte type = entryBuffer[20];
+
+                                // Read the file data
+                                fs.Seek(offset, SeekOrigin.Begin);
+                                byte[] fileData = new byte[compressedSize];
+                                if (fs.Read(fileData, 0, (int)compressedSize) != compressedSize) continue;
+
+                                // Handle Decompression (Zstd/Gzip/Raw)
+                                byte[] rawData;
+                                var rawSpan = new ReadOnlySpan<byte>(fileData);
+
+                                if (IsZstd(rawSpan) || type == 3)
+                                {
+                                    try { rawData = DecompressZstd(fileData, fileData.Length); }
+                                    catch { continue; }
+                                }
+                                else if (IsGzip(rawSpan) || type == 1)
+                                {
+                                    try { rawData = DecompressGzip(fileData, fileData.Length); }
+                                    catch { continue; }
+                                }
+                                else
+                                {
+                                    rawData = fileData;
+                                }
+
+                                // --- READ VERSION AND ID ---
+                                // We need at least 20 bytes (reading up to offset 16 + 4 bytes)
+                                if (rawData.Length >= 20)
+                                {
+                                    uint version = BitConverter.ToUInt32(rawData, 8);  // 0x08
+                                    uint id = BitConverter.ToUInt32(rawData, 16);      // 0x10
+                                    return (version, id);
+                                }
+
+                                return (0, 0); // Found but too small
+                            }
+                        }
+                    }
+                }
+
+                return (0, 0);
+            }
+            public class Target
+            {
+                public List<BinString> BinStringRef { get; set; } = new List<BinString>();
+                public List<BinFile> BinFileRef { get; set; } = new List<BinFile>();
+                public string OriginalPath { get; set; }
+                public List<string> Hashes { get; set; }
+                public string OutputPath { get; set; }
+                public string OutputString { get; set; }
+            }
+
+            public class TargetFile
+            {
+                public List<BinFile> BinFileRef { get; set; }
+                public ulong hash { get; set; }
+                public string path { get; set; }
+            }
+
+            private struct ExtractionJob
+            {
+                public ulong Hash;
+                public uint Offset;
+                public uint CompressedSize;
+                public uint UncompressedSize;
+                public byte Type;
+                public Target Target;
+                public string Extension;
+            }
+
+            public List<Target> ExtractAndSwapReferences(List<string> wadPaths, List<Target> targets, string logColor = CLR_GOOD, string alt_Mod = CLR_MOD)
+            {
+                if (targets == null || targets.Count == 0) return targets;
+                if (wadPaths.Count == 0) return targets;
+
+                var lookup = new Dictionary<ulong, (Target target, string ext, int priority)>();
+                int pendingCount = 0;
+
+                foreach (var t in targets)
+                {
+                    bool added = false;
+                    for (int i = 0; i < t.Hashes.Count; i++)
+                    {
+                        var h = t.Hashes[i];
+                        ulong hashVal = HashMaster.HashPath(h);
+                        if (!lookup.ContainsKey(hashVal))
+                        {
+                            lookup[hashVal] = (t, Path.GetExtension(h), i);
+                            added = true;
+                        }
+                    }
+                    if (added) pendingCount++;
+                }
+
+                var createdDirectories = new HashSet<string>();
+                byte[] entryBuffer = new byte[32];
+
+                // --- Local helper to handle the common write, conversion, and ref-swapping logic ---
+                void ProcessTargetData(Target target, string extension, byte[] finalData)
+                {
+                    string final_out = target.OutputString;
+                    if (!_settings.binless)
+                    {
+                        final_out = string.IsNullOrEmpty(extension)
+                            ? target.OutputString
+                            : Path.ChangeExtension(target.OutputString, extension);
+                    }
+                    if (string.IsNullOrEmpty(Path.GetFileNameWithoutExtension(final_out)))
+					{
+						string parentDir = Path.GetDirectoryName(final_out)?.Replace('\\', '/') ?? "";
+						final_out = $"{parentDir}/dot_{Guid.NewGuid().ToString().Substring(0, 4)}{extension}";
+					}
+                    if (!string.IsNullOrEmpty(target.OutputPath))
+                    {
+                        string outPath = Path.Combine(target.OutputPath, final_out);
+                        string dir = Path.GetDirectoryName(outPath);
+
+                        if (!createdDirectories.Contains(dir, StringComparer.OrdinalIgnoreCase))
+                        {
+                            Directory.CreateDirectory(dir);
+                            createdDirectories.Add(dir);
+                        }
+                        if (extension == ".sco" || extension == ".scb")
+                        {
+                            if (finalData.Length > 0 && finalData[0] == 0x72) // 'r' for r3d2Mesh
+                            {
+                                File.WriteAllBytes(outPath, finalData);
+                            }
+                            else // Defaults to SCO parser if it starts with '[' or text
+                            {
+                                var sco = new SceneObject();
+                                sco.ReadSCO(finalData);
+                                sco.WriteSCB(outPath);
+                            }
+                        }
+                        else
+                        {
+                            File.WriteAllBytes(outPath, finalData);
+                        }
+                    }
+
+                    string right = final_out.Length > 55
+                        ? $"{final_out[..26]}...{final_out[^26..]}"
+                        : final_out;
+
+                    string ext = Path.GetExtension(target.OriginalPath);
+                    if (ext.ToLower() != ".bin")
+                    {
+                        string left = target.OriginalPath.Length > 55
+                            ? $"{target.OriginalPath[..26]}...{target.OriginalPath[^26..]}"
+                            : target.OriginalPath;
+
+                        bool extChanged = !string.Equals(ext, Path.GetExtension(final_out), StringComparison.OrdinalIgnoreCase);
+                        string logTag = extChanged ? "[FIXD]" : "[GOOD]";
+                        string log_c = extChanged ? alt_Mod : logColor;
+                        x.UpperLog($"{logTag} {left,-55} --> {right,-55}", log_c);
+                    }
+
+                    if (target.BinStringRef != null)
+                    {
+                        foreach (BinString s in target.BinStringRef)
+                        {
+                            s.Value = final_out;
+                        }
+                    }
+
+                    if (target.BinFileRef != null)
+                    {
+                        foreach (BinFile s in target.BinFileRef)
+                        {
+                            s.Value = new XXH64 { Hash = HashMaster.HashPath(final_out) };
+                        }
+                    }
+
+                    targets.Remove(target);
+                }
+                // -----------------------------------------------------------------------------------
+
+                foreach (var wadPath in wadPaths)
+                {
+                    if (lookup.Count == 0) break;
+
+                    // 1. Directory handler using topaz.map
+                    if (Directory.Exists(wadPath))
+                    {
+                        string mapFilePath = Path.Combine(wadPath, "topaz.map");
+                        var bestDirCandidates = new Dictionary<Target, (string PhysicalPath, string Extension, int Priority)>();
+
+                        if (File.Exists(mapFilePath))
+                        {
+                            foreach (var kvp in lookup)
+                            {
+                                ulong hash = kvp.Key;
+                                var entry = kvp.Value;
+
+                                // Assuming FindPathInTopazMap exists in your class scope from the previous step
+                                string relativePath = FindPathInTopazMap(mapFilePath, hash);
+                                if (!string.IsNullOrEmpty(relativePath))
+                                {
+                                    string physicalPath = Path.Combine(wadPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+                                    if (File.Exists(physicalPath))
+                                    {
+                                        if (!bestDirCandidates.ContainsKey(entry.target) || entry.priority < bestDirCandidates[entry.target].Priority)
+                                        {
+                                            bestDirCandidates[entry.target] = (physicalPath, entry.ext == ".sco" ? ".scb" : entry.ext, entry.priority);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Fallback if no topaz.map exists: check for files matching the raw string path
+                            foreach (var kvp in lookup)
+                            {
+                                var entry = kvp.Value;
+                                string originalString = entry.target.Hashes[entry.priority];
+                                string physicalPath = Path.Combine(wadPath, originalString.Replace('/', Path.DirectorySeparatorChar));
+
+                                if (File.Exists(physicalPath))
+                                {
+                                    if (!bestDirCandidates.ContainsKey(entry.target) || entry.priority < bestDirCandidates[entry.target].Priority)
+                                    {
+                                        bestDirCandidates[entry.target] = (physicalPath, entry.ext == ".sco" ? ".scb" : entry.ext, entry.priority);
+                                    }
+                                }
+                            }
+                        }
+
+                        if (bestDirCandidates.Count > 0)
+                        {
+                            foreach (var kvp in bestDirCandidates)
+                            {
+                                var target = kvp.Key;
+                                var jobInfo = kvp.Value;
+
+                                // Clean up lookup to prevent re-processing in subsequent WADs
+                                foreach (var h in target.Hashes)
+                                {
+                                    lookup.Remove(HashMaster.HashPath(h));
+                                }
+
+                                // Just read the loose file and process it
+                                byte[] fileData = File.ReadAllBytes(jobInfo.PhysicalPath);
+                                ProcessTargetData(target, jobInfo.Extension, fileData);
+                            }
+                        }
+
+                        continue;
+                    }
+
+                    // 2. WAD archive handler (original behavior)
+                    if (!File.Exists(wadPath)) continue;
+
+                    using (var fs = new FileStream(wadPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length < 272) continue;
+
+                        fs.Seek(268, SeekOrigin.Begin);
+                        uint fileCount = br.ReadUInt32();
+
+                        var bestCandidates = new Dictionary<Target, (ExtractionJob job, int priority)>();
+
+                        for (int i = 0; i < fileCount; i++)
+                        {
+                            if (fs.Read(entryBuffer, 0, 32) != 32) break;
+                            ulong pathHash = BitConverter.ToUInt64(entryBuffer, 0);
+
+                            if (lookup.TryGetValue(pathHash, out var entry))
+                            {
+                                var newJob = new ExtractionJob
+                                {
+                                    Hash = pathHash,
+                                    Target = entry.target,
+                                    Extension = entry.ext == ".sco" ? ".scb" : entry.ext,
+                                    Offset = BitConverter.ToUInt32(entryBuffer, 8),
+                                    CompressedSize = BitConverter.ToUInt32(entryBuffer, 12),
+                                    Type = entryBuffer[20]
+                                };
+
+                                if (!bestCandidates.ContainsKey(entry.target) || entry.priority < bestCandidates[entry.target].priority)
+                                {
+                                    bestCandidates[entry.target] = (newJob, entry.priority);
+                                }
+                            }
+                        }
+
+                        if (bestCandidates.Count == 0) continue;
+
+                        var jobs = bestCandidates.Values.Select(x => x.job).ToList();
+
+                        foreach (var job in jobs)
+                        {
+                            foreach (var h in job.Target.Hashes)
+                                lookup.Remove(HashMaster.HashPath(h));
+                        }
+
+                        if (jobs.Count == 0) continue;
+
+                        jobs.Sort((a, b) => a.Offset.CompareTo(b.Offset));
+
+                        foreach (var job in jobs)
+                        {
+                            fs.Seek(job.Offset, SeekOrigin.Begin);
+                            byte[] poolBuffer = ArrayPool<byte>.Shared.Rent((int)job.CompressedSize);
+
+                            try
+                            {
+                                int bytesRead = fs.Read(poolBuffer, 0, (int)job.CompressedSize);
+                                var rawSpan = new ReadOnlySpan<byte>(poolBuffer, 0, bytesRead);
+
+                                byte[] finalData;
+
+                                if (IsZstd(rawSpan) || job.Type == 3)
+                                {
+                                    try { finalData = DecompressZstd(poolBuffer, bytesRead); }
+                                    catch { finalData = rawSpan.ToArray(); }
+                                }
+                                else if (IsGzip(rawSpan) || job.Type == 1)
+                                {
+                                    finalData = DecompressGzip(poolBuffer, bytesRead);
+                                }
+                                else
+                                {
+                                    finalData = rawSpan.ToArray();
+                                }
+
+                                // Route to the shared logic block
+                                ProcessTargetData(job.Target, job.Extension, finalData);
+                            }
+                            finally
+                            {
+                                ArrayPool<byte>.Shared.Return(poolBuffer);
+                            }
+                        }
+                    }
+                }
+
+                return targets;
+            }
+            public List<Target> FindAndSwapReferences(List<string> wadPaths, List<Target> targets)
+            {
+                if (targets == null || targets.Count == 0) return targets;
+                if (wadPaths.Count == 0) return targets;
+
+                // Dictionary to map Hash -> (Target Object, Index in the Hashes List)
+                var lookup = new Dictionary<ulong, (Target target, int index)>();
+                int pendingCount = 0;
+
+                foreach (var t in targets)
+                {
+                    bool added = false;
+                    // Iterate through all possible hashes for this target
+                    for (int i = 0; i < t.Hashes.Count; i++)
+                    {
+                        var h = t.Hashes[i];
+                        ulong hashVal = HashMaster.HashPath(h);
+
+                        // Only add if not already present (prioritizing the first occurrence if duplicates exist)
+                        if (!lookup.ContainsKey(hashVal))
+                        {
+                            lookup[hashVal] = (t, i);
+                            added = true;
+                        }
+                    }
+                    if (added) pendingCount++;
+                }
+
+                // Buffer to read directory entries (32 bytes per file entry)
+                byte[] entryBuffer = new byte[32];
+
+                // Helper to resolve candidates and swap references cleanly
+                void ApplyCandidateMatches(Dictionary<Target, int> bestCandidates)
+                {
+                    if (bestCandidates.Count == 0) return;
+
+                    foreach (var candidate in bestCandidates)
+                    {
+                        Target t = candidate.Key;
+                        int hashIndex = candidate.Value;
+
+                        // Retrieve the actual string that exists in the WAD or folder
+                        string foundString = t.Hashes[hashIndex];
+
+                        // Remove all hashes for this target from lookup so we don't process it again in other WADs/folders
+                        foreach (var h in t.Hashes)
+                        {
+                            lookup.Remove(HashMaster.HashPath(h));
+                        }
+
+                        if (t.BinStringRef != null)
+                        {
+                            foreach (BinString s in t.BinStringRef)
+                            {
+                                s.Value = foundString;
+                            }
+                        }
+
+                        if (t.BinFileRef != null)
+                        {
+                            foreach (BinFile f in t.BinFileRef)
+                            {
+                                f.Value = new XXH64 { Hash = HashMaster.HashPath(foundString) };
+                            }
+                        }
+
+                        // --- Logging ---
+                        string left = t.OriginalPath.Length > 55
+                            ? $"{t.OriginalPath[..26]}...{t.OriginalPath[^26..]}"
+                            : t.OriginalPath;
+
+                        string right = foundString.Length > 55
+                            ? $"{foundString[..26]}...{foundString[^26..]}"
+                            : foundString;
+
+                        bool pathChanged = !string.Equals(t.OriginalPath, foundString, StringComparison.OrdinalIgnoreCase);
+                        x.UpperLog($"[UPDT] {left,-55} --> {right,-55}", pathChanged ? CLR_MOD : CLR_GOOD);
+
+                        targets.Remove(t);
+                    }
+                }
+
+                foreach (var wadPath in wadPaths)
+                {
+                    if (lookup.Count == 0) break;
+
+                    // 1. Directory scan / topaz.map handler
+                    if (Directory.Exists(wadPath))
+                    {
+                        string mapFilePath = Path.Combine(wadPath, "topaz.map");
+                        var bestCandidates = new Dictionary<Target, int>();
+
+                        if (File.Exists(mapFilePath))
+                        {
+                            foreach (var kvp in lookup)
+                            {
+                                ulong hash = kvp.Key;
+                                var entry = kvp.Value;
+
+                                string? relativePath = FindPathInTopazMap(mapFilePath, hash);
+                                if (!string.IsNullOrEmpty(relativePath))
+                                {
+                                    string physicalPath = Path.Combine(wadPath, relativePath.Replace('/', Path.DirectorySeparatorChar));
+                                    if (File.Exists(physicalPath))
+                                    {
+                                        if (!bestCandidates.ContainsKey(entry.target) || entry.index < bestCandidates[entry.target])
+                                        {
+                                            bestCandidates[entry.target] = entry.index;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        else
+                        {
+                            // Fallback if no topaz.map exists: check for files matching the raw string path
+                            foreach (var kvp in lookup)
+                            {
+                                var entry = kvp.Value;
+                                string candidatePath = entry.target.Hashes[entry.index];
+                                string physicalPath = Path.Combine(wadPath, candidatePath.Replace('/', Path.DirectorySeparatorChar));
+
+                                if (File.Exists(physicalPath))
+                                {
+                                    if (!bestCandidates.ContainsKey(entry.target) || entry.index < bestCandidates[entry.target])
+                                    {
+                                        bestCandidates[entry.target] = entry.index;
+                                    }
+                                }
+                            }
+                        }
+
+                        ApplyCandidateMatches(bestCandidates);
+                        continue;
+                    }
+
+                    // 2. WAD archive handler
+                    if (!File.Exists(wadPath)) continue;
+
+                    using (var fs = new FileStream(wadPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var br = new BinaryReader(fs))
+                    {
+                        if (fs.Length < 272) continue;
+
+                        // Jump to file count in WAD header
+                        fs.Seek(268, SeekOrigin.Begin);
+                        uint fileCount = br.ReadUInt32();
+
+                        var bestCandidates = new Dictionary<Target, int>();
+
+                        for (int i = 0; i < fileCount; i++)
+                        {
+                            if (fs.Read(entryBuffer, 0, 32) != 32) break;
+
+                            ulong pathHash = BitConverter.ToUInt64(entryBuffer, 0);
+
+                            if (lookup.TryGetValue(pathHash, out var entry))
+                            {
+                                if (!bestCandidates.ContainsKey(entry.target) || entry.index < bestCandidates[entry.target])
+                                {
+                                    bestCandidates[entry.target] = entry.index;
+                                }
+                            }
+                        }
+
+                        ApplyCandidateMatches(bestCandidates);
+                    }
+                }
+
+                return targets;
+            }
+            private static bool IsZstd(ReadOnlySpan<byte> data) =>
+        data.Length >= 4 &&
+        data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD;
+
+            private static bool IsGzip(ReadOnlySpan<byte> data) =>
+              data.Length >= 2 &&
+              data[0] == 0x1F && data[1] == 0x8B;
+
+            private static byte[] DecompressGzip(byte[] data, int length)
+            {
+                using var ms = new MemoryStream(data, 0, length);
+                using var gs = new GZipStream(ms, CompressionMode.Decompress);
+                using var outMs = new MemoryStream();
+                gs.CopyTo(outMs);
+                return outMs.ToArray();
+            }
+
+            private static byte[] DecompressZstd(byte[] data, int length)
+            {
+                var decompressor = new Decompressor();
+                var span = new ReadOnlySpan<byte>(data, 0, length);
+                return decompressor.Unwrap(span.ToArray()).ToArray();
+            }
+            private class ProcessedEntry
+            {
+                public WadEntryInfo Info;
+                public byte[] Data;
+            }
+
+            // public void PackDirectoryToWadCompressed(string sourceDirectory, string outputWadPath)
+            // {
+            //     if (!Directory.Exists(sourceDirectory))
+            //         throw new DirectoryNotFoundException(sourceDirectory);
+            // 
+            //     string outputDir = Path.GetDirectoryName(outputWadPath);
+            //     if (!string.IsNullOrEmpty(outputDir)) Directory.CreateDirectory(outputDir);
+            // 
+            //     var files = Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories);
+            // 
+            //     // FIX: Use an array of objects instead of a Dictionary to avoid threading crashes
+            //     var processedEntries = new ProcessedEntry[files.Length];
+            // 
+            //     // -------------------------------
+            //     // 1. Compress + hash (parallel)
+            //     // -------------------------------
+            //     Parallel.For(0, files.Length, i =>
+            //     {
+            //         string file = files[i];
+            //         string relativePath = Path.GetRelativePath(sourceDirectory, file)
+            //             .Replace('\\', '/')
+            //             .ToLowerInvariant();
+            // 
+            //         // cslol-tools uses XXH64 for path hashing
+            //         ulong pathHash = HashMaster.HashPath(relativePath);
+            //         byte[] originalBytes = File.ReadAllBytes(file);
+            // 
+            //         // Logic matches cslol-tools (Magic bytes are safer, but extension works for basic mods)
+            //         bool rawOnly = relativePath.EndsWith(".bnk") || relativePath.EndsWith(".wpk");
+            // 
+            //         byte[] finalData;
+            //         byte compressionType;
+            // 
+            //         if (rawOnly)
+            //         {
+            //             finalData = originalBytes;
+            //             compressionType = 0; // Raw
+            //         }
+            //         else
+            //         {
+            //             // Zstd Level 0 in C++ maps to default level 3
+            //             using var compressor = new Compressor(3);
+            //             finalData = compressor.Wrap(originalBytes).ToArray();
+            //             compressionType = 3; // Zstd
+            //         }
+            // 
+            //         // XXH3 Checksum of the FINAL (compressed) data
+            //         ulong checksum = XxHash3.HashToUInt64(finalData);
+            // 
+            //         // Store directly in array slot 'i' (Thread-Safe)
+            //         processedEntries[i] = new ProcessedEntry
+            //         {
+            //             Info = new WadEntryInfo
+            //             {
+            //                 FilePath = file,
+            //                 PathHash = pathHash,
+            //                 Size = (uint)finalData.Length,
+            //                 UncompressedSize = (uint)originalBytes.Length,
+            //                 CompressionType = compressionType,
+            //                 DataChecksum = checksum
+            //             },
+            //             Data = finalData
+            //         };
+            //     });
+            // 
+            //     // -------------------------------
+            //     // 2. Sort by hash (WAD standard)
+            //     // -------------------------------
+            //     // We sort the combined array so Data stays with Info
+            //     Array.Sort(processedEntries, (a, b) => a.Info.PathHash.CompareTo(b.Info.PathHash));
+            // 
+            //     // -------------------------------
+            //     // 3.4 Requirement: TOC Checksum
+            //     // -------------------------------
+            //     byte[] headerChecksum = CalculateTocChecksum(processedEntries);
+            // 
+            //     // -------------------------------
+            //     // 3. Write WAD (Version 3.4)
+            //     // -------------------------------
+            //     using var fs = new FileStream(outputWadPath, FileMode.Create, FileAccess.Write);
+            //     using var bw = new BinaryWriter(fs);
+            // 
+            //     // ---- Header (v3.4) ----
+            //     bw.Write(new[] { 'R', 'W' });
+            //     bw.Write((byte)3); // Major
+            //     bw.Write((byte)4); // Minor (Updated to 4)
+            //     bw.Write(headerChecksum); // 3.4 Required Checksum
+            //     bw.Write(new byte[248]); // ECDSA Signature (Empty)
+            //     bw.Write((uint)processedEntries.Length);
+            // 
+            //     // Calculate Data Start Offset
+            //     // Header (272) + Entries (Count * 32 bytes)
+            //     uint currentOffset = 272 + (uint)(processedEntries.Length * 32);
+            // 
+            //     // Deduplication Map: Maps DataChecksum -> FileOffset
+            //     var writtenOffsets = new Dictionary<ulong, uint>();
+            // 
+            //     // ---- TOC ----
+            //     foreach (var entry in processedEntries)
+            //     {
+            //         // Deduplication: If we already wrote this data, point to it
+            //         if (!writtenOffsets.TryGetValue(entry.Info.DataChecksum, out uint entryOffset))
+            //         {
+            //             entryOffset = currentOffset;
+            //             writtenOffsets[entry.Info.DataChecksum] = currentOffset;
+            //             currentOffset += entry.Info.Size;
+            //         }
+            // 
+            //         bw.Write(entry.Info.PathHash);
+            //         bw.Write(entryOffset);
+            //         bw.Write(entry.Info.Size);
+            //         bw.Write(entry.Info.UncompressedSize);
+            // 
+            //         // v3.4 Entry: Type (4 bits) | SubChunkCount (4 bits)
+            //         // Usually count is 0.
+            //         bw.Write((byte)(entry.Info.CompressionType & 0xF));
+            // 
+            //         // v3.4 Entry: SubChunkIndex (3 bytes / 24-bit)
+            //         // Writing 3 zeros
+            //         bw.Write((byte)0);
+            //         bw.Write((byte)0);
+            //         bw.Write((byte)0);
+            // 
+            //         bw.Write(entry.Info.DataChecksum);
+            //     }
+            // 
+            //     // ---- Data ----
+            //     // Write distinct data chunks
+            //     var writtenChecksums = new HashSet<ulong>();
+            //     foreach (var entry in processedEntries)
+            //     {
+            //         if (writtenChecksums.Add(entry.Info.DataChecksum))
+            //         {
+            //             bw.Write(entry.Data);
+            //         }
+            //     }
+            // }
+
+            // -------------------------------
+            // Helper for WAD 3.4 Checksum
+            // -------------------------------
+            private byte[] CalculateTocChecksum(ProcessedEntry[] sortedEntries)
+            {
+                var hasher = new XxHash128();
+                // 3.4 Header Magic+Ver
+                hasher.Append(new byte[] { (byte)'R', (byte)'W', 3, 4 });
+
+                foreach (var e in sortedEntries)
+                {
+                    hasher.Append(BitConverter.GetBytes(e.Info.PathHash));
+                    hasher.Append(BitConverter.GetBytes(e.Info.DataChecksum));
+                }
+
+                byte[] hash = hasher.GetCurrentHash();
+                Array.Reverse(hash);
+                return hash;
+            }
+
+        }
+
+        public class PathFixer
+        {
+            private FixerSettings _settings;
+            public PathFixer(FixerSettings settings)
+            {
+                _settings = settings;
+            }
+
+            static readonly string[] Roots = { "assets", "data" };
+
+            static readonly string[] Categories =
+            {
+                "characters", "items", "loadouts", "maps", "particles",
+                "perks", "rewards", "shared", "sounds", "spells", "ux"
+            };
+            private HashSet<string> seen = new HashSet<string>();
+            private HashSet<string> seen_pre = new HashSet<string>();
+            public string FixPath(string finalPath)
+            {
+                string og_path = finalPath;
+                finalPath = FixPath_local(finalPath);
+
+                if (seen.Add(finalPath))
+                {
+                    seen_pre.Add(og_path);
+                    return finalPath;
+                }
+
+                if (!seen_pre.Add(og_path))
+                {
+                    return finalPath;
+                }
+
+
+                string dir = Path.GetDirectoryName(finalPath)!;
+                string name = Path.GetFileNameWithoutExtension(finalPath);
+                string ext = Path.GetExtension(finalPath);
+
+                int i = 1;
+                string candidate;
+
+                do
+                {
+                    candidate = Path.Combine(dir, $"{name}_{i}{ext}");
+                    i++;
+                }
+                while (!seen.Add(candidate));
+
+                return candidate.Replace('\\', '/');
+            }
+
+            public string FixPath_local(string finalPath)
+            {
+                if (_settings.cls_assets)
+                    finalPath = CleanRootPath(finalPath);
+
+                string[] parts = finalPath.Replace("\\", "/").Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+                string firstFolder = parts.Length > 0 ? parts[0].ToLower() : "";
+                string ext = parts.Length > 0
+                    ? Path.GetExtension(parts[^1]).ToLower()
+                    : "";
+
+                string repath = _settings.repath_path_path;
+                bool inFilePath = _settings.in_file_path;
+                if (inFilePath && !repath.EndsWith("_")) repath = $"{repath}_";
+
+                if (firstFolder == "data" || firstFolder == "assets")
+                {
+                    string root = firstFolder == "data" ? "DATA" : "ASSETS";
+
+                    if (inFilePath)
+                    {
+                        string prefix = $"{root}/{repath}{parts.ElementAtOrDefault(1)}";
+                        string rest = parts.Length > 2
+                            ? string.Join("/", parts.Skip(2))
+                            : "";
+
+                        return rest.Length > 0 ? $"{prefix}/{rest}" : prefix;
+                    }
+                    else
+                    {
+                        parts[0] = $"{root}/{repath}";
+                        return string.Join("/", parts);
+                    }
+                }
+
+                bool isFileOnly = parts.Length == 1;
+
+                if (isFileOnly)
+                {
+                    return $"ASSETS/{repath}/{parts[0]}";
+                }
+
+                string prefixRoot = (ext == ".bin" || ext == "")
+                    ? "DATA"
+                    : "ASSETS";
+
+                if (inFilePath)
+                {
+                    return $"{prefixRoot}/{repath}{parts[0]}/" +
+                           string.Join("/", parts.Skip(1));
+                }
+                else
+                {
+                    return $"{prefixRoot}/{repath}/" +
+                           string.Join("/", parts);
+                }
+            }
+
+            static string CleanRootPath(string path)
+            {
+                string[] parts = path.Replace("\\", "/").Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+                int rootIndex = -1;
+                string rootName = "";
+
+                for (int i = 0; i < parts.Length; i++)
+                {
+                    string pLower = parts[i].ToLower();
+                    foreach (string r in Roots)
+                    {
+                        if (pLower == r || pLower.Contains(r))
+                        {
+                            rootIndex = i;
+                            rootName = r;
+                            break;
+                        }
+                    }
+                    if (rootIndex != -1) break;
+                }
+
+                if (rootIndex == -1)
+                {
+                    string ext = parts.Length > 0
+                        ? Path.GetExtension(parts[^1]).ToLower()
+                        : "";
+                    string prefixRoot = (ext == ".bin" || ext == "")
+                        ? "DATA"
+                        : "ASSETS";
+                    var list = parts.ToList();
+                    list.Insert(0, prefixRoot);
+                    parts = list.ToArray();
+                }
+                else
+                {
+                    parts = parts.Skip(rootIndex).ToArray();
+                }
+
+                if (parts.Length <= 1)
+                {
+                    return string.Join("/", parts);
+                }
+
+                // Search from index 1 up to the last directory before the filename (or parts.Length - 1)
+                // to find where the category is located
+                int categoryIndex = -1;
+                string matchedCategory = "";
+
+                for (int i = 1; i < parts.Length; i++)
+                {
+                    string segLower = parts[i].ToLower();
+                    foreach (string cat in Categories)
+                    {
+                        if (segLower == cat || segLower.Contains(cat))
+                        {
+                            categoryIndex = i;
+                            matchedCategory = cat;
+                            break;
+                        }
+                    }
+                    if (categoryIndex != -1) break;
+                }
+
+                // If a category was found deeper than parts[1], drop all intermediate folders between root and category
+                if (categoryIndex != -1)
+                {
+                    parts[categoryIndex] = matchedCategory;
+
+                    if (categoryIndex > 1)
+                    {
+                        // Keep parts[0] (root) and parts[categoryIndex..^1] (category + remaining path)
+                        parts = new[] { parts[0] }
+                            .Concat(parts.Skip(categoryIndex))
+                            .ToArray();
+                    }
+                }
+
+                return string.Join("/", parts);
+            }
+        }
+
+
+    }
+    public enum SOFlag : uint
+    {
+        HasVcp = 1,
+        HasLocalOriginLocatorAndPivot = 2
+    }
+
+    public struct Vector3
+    {
+        public float X, Y, Z;
+        public Vector3(float x, float y, float z) { X = x; Y = y; Z = z; }
+    }
+
+    public struct Vector2
+    {
+        public float X, Y;
+        public Vector2(float x, float y) { X = x; Y = y; }
+    }
+
+    public class SceneObject
+    {
+        public string Name;
+        public Vector3 Central;
+        public Vector3 Pivot;
+        public string Material;
+        public List<Vector3> Positions = new List<Vector3>();
+        public List<int> Indices = new List<int>();
+        public List<Vector2> UVs = new List<Vector2>();
+        public SOFlag Flags = SOFlag.HasLocalOriginLocatorAndPivot;
+
+        // --- SCO READER (Text) ---
+        public void ReadSCO(byte[] data)
+        {
+            // Clear previous data if reusing the object
+            Positions.Clear();
+            Indices.Clear();
+            UVs.Clear();
+
+            using (MemoryStream ms = new MemoryStream(data))
+            using (StreamReader reader = new StreamReader(ms, Encoding.UTF8))
+            {
+                string firstLine = reader.ReadLine()?.Trim();
+                if (firstLine != "[ObjectBegin]")
+                    throw new Exception("Invalid SCO Signature: " + firstLine);
+
+                string line;
+                while ((line = reader.ReadLine()) != null)
+                {
+                    line = line.Trim();
+                    if (string.IsNullOrEmpty(line) || line == "[ObjectEnd]") continue;
+
+                    string[] inp = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (inp.Length == 0) continue;
+
+                    switch (inp[0])
+                    {
+                        case "Name=":
+                            Name = inp.Length > 1 ? inp[1] : "";
+                            break;
+
+                        case "CentralPoint=":
+                            Central = new Vector3(
+                                float.Parse(inp[1], CultureInfo.InvariantCulture), float.Parse(inp[2], CultureInfo.InvariantCulture), float.Parse(inp[3], CultureInfo.InvariantCulture));
+                            break;
+
+                        case "PivotPoint=":
+                            Pivot = new Vector3(
+                                float.Parse(inp[1], CultureInfo.InvariantCulture), float.Parse(inp[2], CultureInfo.InvariantCulture), float.Parse(inp[3], CultureInfo.InvariantCulture));
+                            break;
+
+                        case "Verts=":
+                            int vertexCount = int.Parse(inp[1], CultureInfo.InvariantCulture);
+                            for (int i = 0; i < vertexCount; i++)
+                            {
+                                string[] v = reader.ReadLine().Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                                Positions.Add(new Vector3(float.Parse(v[0], CultureInfo.InvariantCulture), float.Parse(v[1], CultureInfo.InvariantCulture), float.Parse(v[2], CultureInfo.InvariantCulture)));
+                            }
+                            break;
+
+                        case "Faces=":
+                            int faceCount = int.Parse(inp[1], CultureInfo.InvariantCulture);
+                            for (int i = 0; i < faceCount; i++)
+                            {
+                                // Replace tabs with spaces to handle both formatting styles
+                                string faceLine = reader.ReadLine().Replace('\t', ' ');
+                                string[] f = faceLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+
+                                // Indices are in f[1], f[2], f[3]
+                                Indices.Add(int.Parse(f[1], CultureInfo.InvariantCulture));
+                                Indices.Add(int.Parse(f[2], CultureInfo.InvariantCulture));
+                                Indices.Add(int.Parse(f[3], CultureInfo.InvariantCulture));
+
+                                Material = f[4];
+
+                                // SCO UVs: U1 V1 U2 V2 U3 V3
+                                UVs.Add(new Vector2(float.Parse(f[5], CultureInfo.InvariantCulture), float.Parse(f[6], CultureInfo.InvariantCulture)));
+                                UVs.Add(new Vector2(float.Parse(f[7], CultureInfo.InvariantCulture), float.Parse(f[8], CultureInfo.InvariantCulture)));
+                                UVs.Add(new Vector2(float.Parse(f[9], CultureInfo.InvariantCulture), float.Parse(f[10], CultureInfo.InvariantCulture)));
+                            }
+                            break;
+                    }
+                }
+            }
+        }
+        // --- SCB WRITER (Binary) ---
+        public void WriteSCB(string path)
+        {
+            using (BinaryWriter bw = new BinaryWriter(File.Open(path, FileMode.Create)))
+            {
+                // 1. Signature & Version
+                bw.Write(Encoding.ASCII.GetBytes("r3d2Mesh")); // 8 bytes
+                bw.Write((ushort)3); // Major
+                bw.Write((ushort)2); // Minor
+
+                // 2. Name (Padded 128)
+                byte[] nameBytes = new byte[128];
+                Encoding.ASCII.GetBytes(Name ?? "").CopyTo(nameBytes, 0);
+                bw.Write(nameBytes);
+
+                // 3. Counts & Flags
+                bw.Write((uint)Positions.Count);
+                bw.Write((uint)(Indices.Count / 3));
+                bw.Write((uint)Flags);
+
+                // 4. Bounding Box (Calculated)
+                var (min, max) = GetBoundingBox();
+                WriteVec3(bw, min);
+                WriteVec3(bw, max);
+
+                // 5. Vertex Type (0 for no colors)
+                bw.Write((uint)0);
+
+                // 6. Positions
+                foreach (var pos in Positions) WriteVec3(bw, pos);
+
+                // 7. Central Point
+                WriteVec3(bw, Central);
+
+                // 8. Faces (Indices, Material, UVs)
+                int faceCount = Indices.Count / 3;
+                for (int i = 0; i < faceCount; i++)
+                {
+                    int idx = i * 3;
+                    bw.Write((uint)Indices[idx]);
+                    bw.Write((uint)Indices[idx + 1]);
+                    bw.Write((uint)Indices[idx + 2]);
+
+                    byte[] matBytes = new byte[64];
+                    Encoding.ASCII.GetBytes(Material ?? "lambert1").CopyTo(matBytes, 0);
+                    bw.Write(matBytes);
+
+                    // UV Layout: U1, U2, U3, V1, V2, V3
+                    bw.Write(UVs[idx].X);
+                    bw.Write(UVs[idx + 1].X);
+                    bw.Write(UVs[idx + 2].X);
+                    bw.Write(UVs[idx].Y);
+                    bw.Write(UVs[idx + 1].Y);
+                    bw.Write(UVs[idx + 2].Y);
+                }
+            }
+        }
+
+        private void ParseVector3(string line, out Vector3 vec)
+        {
+            string[] p = line.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            vec = new Vector3(float.Parse(p[1], CultureInfo.InvariantCulture), float.Parse(p[2], CultureInfo.InvariantCulture), float.Parse(p[3], CultureInfo.InvariantCulture));
+        }
+
+        private void WriteVec3(BinaryWriter bw, Vector3 v)
+        {
+            bw.Write(v.X); bw.Write(v.Y); bw.Write(v.Z);
+        }
+
+        private (Vector3 min, Vector3 max) GetBoundingBox()
+        {
+            Vector3 min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue);
+            Vector3 max = new Vector3(float.MinValue, float.MinValue, float.MinValue);
+            foreach (var p in Positions)
+            {
+                if (p.X < min.X) min.X = p.X; if (p.X > max.X) max.X = p.X;
+                if (p.Y < min.Y) min.Y = p.Y; if (p.Y > max.Y) max.Y = p.Y;
+                if (p.Z < min.Z) min.Z = p.Z; if (p.Z > max.Z) max.Z = p.Z;
+            }
+            return (min, max);
+        }
+    }
+}

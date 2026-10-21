@@ -1,0 +1,605 @@
+﻿using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.IO.Pipes;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
+using Application = System.Windows.Application;
+using Cursors = System.Windows.Input.Cursors;
+
+namespace ModManager
+{
+    public class AppInfo
+    {
+        // Reads the Win32 File Version directly from the running .exe header
+        public static string Version =>
+            FileVersionInfo.GetVersionInfo(Environment.ProcessPath ?? Assembly.GetEntryAssembly().Location).FileVersion
+            ?? "1.0.0.0";
+    }
+    public static class Logger
+    {
+        private static readonly string logFilePath = "Simple_logs.txt";
+        public static void Log(string message)
+        {
+            try
+            {
+                // Split by newlines so each line gets a timestamp
+                var lines = message.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+                using (StreamWriter sw = new StreamWriter(logFilePath, true))
+                {
+                    foreach (var line in lines)
+                    {
+                        string logEntry = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss} - {line}";
+                        sw.WriteLine(logEntry);
+                    }
+                }
+            }
+            catch
+            {
+                // silently ignore logging errors to prevent crashes
+            }
+        }
+        public static void LogError(string message, Exception ex)
+        {
+            Log($"ERROR: {message}\nException: {ex}");
+        }
+    }
+
+    public static class Globals
+    {
+        public static bool StartWithLoaded = false;
+        public static bool StartMinimized = false;
+        public static bool is_startup = false;
+        public static bool _hasMutexOwnership = false;
+
+        public static bool IsMainLoaded = false;
+        public static ConcurrentQueue<string> ProtocolQueue = new ConcurrentQueue<string>();
+    }
+
+    public partial class App : Application
+    {
+        const string PipeName = "ModdoLoudaDA_paipu";
+        private static Mutex _mutex;
+        protected override void OnStartup(StartupEventArgs e)
+        {
+            // System.Diagnostics.Debugger.Launch();
+            bool isNewInstance;
+            _mutex = new Mutex(true, @"Global\ModdoLoudaDA", out isNewInstance);
+            Globals._hasMutexOwnership = isNewInstance;
+            if (!isNewInstance)
+            {
+                SendArgsToExistingInstance(e.Args);
+                Shutdown();
+                return;
+            }
+
+            if (e.Args.Contains("--startup"))
+            {
+                Globals.StartWithLoaded = true;
+            }
+            if (e.Args.Contains("--minimized"))
+            {
+                Globals.StartMinimized = true;
+            }
+            if (e.Args.Contains("--isstartup"))
+            {
+                Globals.is_startup = true;
+            }
+
+            foreach (var arg in e.Args)
+            {
+                if (arg.StartsWith("runeforge-mod://"))
+                {
+                    HandleArguments(arg);
+                }
+            }
+
+            base.OnStartup(e);
+
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    try
+                    {
+                        using var server = new NamedPipeServerStream(PipeName, PipeDirection.In);
+                        using var reader = new StreamReader(server);
+                        server.WaitForConnection();
+                        string arguments = reader.ReadToEnd();
+                        Application.Current.Dispatcher.Invoke(() =>
+                        {
+                            HandleArguments(arguments);
+                            if (!arguments.Contains("--dbu"))
+                            {
+                                BringToFront();
+                            }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"Pipe error: {ex.Message}");
+                    }
+                }
+            });
+
+
+        }
+
+        void HandleArguments(string args)
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                Globals.ProtocolQueue.Enqueue(args);
+
+                if (Globals.IsMainLoaded && Application.Current.MainWindow is MainWindow mainWindow)
+                {
+                    mainWindow.TriggerQueueProcessing();
+                }
+            });
+        }
+
+
+
+        [DllImport("user32.dll")]
+        private static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+        const int SW_RESTORE = 9;
+
+        void BringToFront()
+        {
+            Application.Current.Dispatcher.Invoke(() =>
+            {
+                var mainWindow = Application.Current.MainWindow;
+                if (mainWindow == null) return;
+
+                // If your app uses "Hide to Tray", it might be Visibility.Hidden
+                if (mainWindow.Visibility != Visibility.Visible)
+                {
+                    mainWindow.Show(); // Bring it back
+                }
+
+                // Also handle minimize
+                if (mainWindow.WindowState == WindowState.Minimized)
+                {
+                    mainWindow.WindowState = WindowState.Normal;
+                }
+                mainWindow.ShowInTaskbar = true;
+                // Bring it to foreground
+                mainWindow.Activate(); // Better than SetForegroundWindow in WPF
+                mainWindow.Topmost = true;  // Force z-order
+                mainWindow.Topmost = false; // Reset
+                mainWindow.Focus();
+            });
+        }
+
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            if (Globals._hasMutexOwnership)
+            {
+                _mutex?.ReleaseMutex();
+            }
+            _mutex?.Dispose();
+            base.OnExit(e);
+        }
+        void SendArgsToExistingInstance(string[] args)
+        {
+            try
+            {
+                using (var client = new NamedPipeClientStream(".", PipeName, PipeDirection.Out))
+                {
+                    client.Connect(500);
+                    using (var writer = new StreamWriter(client))
+                    {
+                        writer.WriteLine(string.Join(" ", args));
+                        writer.Flush(); // Ensure data is sent
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Pipe error: {ex.Message}"); // Debug the actual error
+            }
+        }
+    }
+
+
+
+
+    public class ContextMenuWindow : Window
+    {
+        public event Action OnShowClicked;
+        public event Action OnExitClicked;
+        public event Action OnLoaderClicked;
+
+        private Button _loaderButton;
+        private bool _isLoaderRunning = false;
+        private bool _isLoaderDisabled = false;
+
+        public ContextMenuWindow()
+        {
+            InitializeWindow();
+            CreateMenu();
+        }
+
+        private void InitializeWindow()
+        {
+            this.WindowStyle = WindowStyle.None;
+            this.ResizeMode = ResizeMode.NoResize;
+            this.AllowsTransparency = true;
+            this.Background = System.Windows.Media.Brushes.Transparent;
+            this.ShowInTaskbar = false;
+            this.Topmost = true;
+            this.Width = 120;
+            this.Height = 76; // Increased height to accommodate third button
+            this.Deactivated += (s, e) => this.Hide();
+        }
+
+        private void CreateMenu()
+        {
+            System.Windows.Media.Brush backgroundBrush = (System.Windows.Media.Brush)Application.Current.FindResource("BackgroundBrush");
+            System.Windows.Media.Brush borderBrush = (System.Windows.Media.Brush)Application.Current.FindResource("AccentBrush");
+            System.Windows.Media.Brush textBrush = System.Windows.Media.Brushes.White;
+
+            var border = new Border
+            {
+                Background = backgroundBrush,
+                BorderBrush = borderBrush,
+                BorderThickness = new Thickness(2), // Increased from 1 to 3 (2px thicker)
+                CornerRadius = new CornerRadius(3)
+            };
+
+            var stackPanel = new StackPanel();
+
+            // Create loader button (positioned at top)
+            _loaderButton = CreateMenuItem("Load Mods", textBrush);
+            _loaderButton.Click += (s, e) => { OnLoaderClicked?.Invoke(); this.Hide(); };
+
+            var showButton = CreateMenuItem("Show", textBrush);
+            showButton.Click += (s, e) => { OnShowClicked?.Invoke(); this.Hide(); };
+
+            var exitButton = CreateMenuItem("Exit", textBrush);
+            exitButton.Click += (s, e) => { OnExitClicked?.Invoke(); this.Hide(); };
+
+            // Add buttons in order: Loader, Show, Exit
+            stackPanel.Children.Add(_loaderButton);
+            stackPanel.Children.Add(showButton);
+            stackPanel.Children.Add(exitButton);
+
+            border.Child = stackPanel;
+            this.Content = border;
+        }
+
+        private Button CreateMenuItem(string text, System.Windows.Media.Brush foreground)
+        {
+            return new Button
+            {
+                Style = (Style)Application.Current.Resources["tray_highlight"],
+                Content = text,
+                Background = System.Windows.Media.Brushes.Transparent,
+                Foreground = foreground,
+                BorderThickness = new Thickness(0),
+                Padding = new Thickness(8, 4, 8, 4),
+                HorizontalContentAlignment = HorizontalAlignment.Left,
+                Cursor = Cursors.Hand
+            };
+        }
+
+        public void UpdateLoaderState(bool isRunning, bool isDisabled = false)
+        {
+            _isLoaderRunning = isRunning;
+            _isLoaderDisabled = isDisabled;
+
+            if (_loaderButton != null)
+            {
+                _loaderButton.Content = isRunning ? "Stop Mods" : "Load Mods";
+                _loaderButton.IsEnabled = !isDisabled;
+
+                // Optional: Change appearance when disabled
+                if (isDisabled)
+                {
+                    _loaderButton.Foreground = System.Windows.Media.Brushes.Gray;
+                    _loaderButton.Cursor = Cursors.Arrow;
+                }
+                else
+                {
+                    _loaderButton.Foreground = System.Windows.Media.Brushes.White;
+                    _loaderButton.Cursor = Cursors.Hand;
+                }
+            }
+        }
+        public void ShowAt(int x, int y)
+        {
+            // 1. Get the WorkArea (Primary Screen only, excludes taskbar)
+            // This returns coordinates in WPF "Device Independent Pixels" (DIPs)
+            Rect workArea = System.Windows.SystemParameters.WorkArea;
+
+            // 2. Setup initial target position
+            double newLeft = x;
+            double newTop = y - this.Height;
+
+            // 3. Horizontal Clamping (Right Edge)
+            // If the window extends past the right edge of the screen...
+            if (newLeft + this.Width > workArea.Right)
+            {
+                // ...shift it to the left of the cursor instead
+                newLeft = x - this.Width;
+
+                // Safety: If it now goes off the LEFT edge, pin it to the left
+                if (newLeft < workArea.Left) newLeft = workArea.Left;
+            }
+
+            // 4. Vertical Clamping (Top/Bottom Edges)
+            if (newTop < workArea.Top)
+            {
+                // If it goes off the top, show it BELOW the mouse Y
+                newTop = y;
+            }
+            else if (newTop + this.Height > workArea.Bottom)
+            {
+                // If it goes off the bottom, pin it to the bottom edge
+                newTop = workArea.Bottom - this.Height;
+            }
+
+            // 5. Apply
+            this.Left = newLeft;
+            this.Top = newTop;
+
+            this.Show();
+            this.Activate();
+        }
+    }
+    public static class ImageLoader
+    {
+        private static readonly string[] Extensions =
+        {
+        ".png", ".jpg", ".jpeg", ".bmp", ".gif"
+    };
+
+        public static BitmapSource? GetModImage(string modFolder)
+        {
+            string metaFolder = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "installed",
+                modFolder,
+                "META");
+
+            if (!Directory.Exists(metaFolder))
+                return null;
+
+            foreach (var ext in Extensions)
+            {
+                string imagePath = Path.Combine(metaFolder, "image" + ext);
+                if (File.Exists(imagePath))
+                    return LoadBitmap(imagePath);
+            }
+
+            return null;
+        }
+
+        private static BitmapSource? LoadBitmap(string filePath)
+        {
+            const int maxWidth = 600;
+            const double maxHeightRatio = 1.8;
+
+            try
+            {
+                BitmapSource source;
+
+                // 🔥 Load fully into memory (no file locks)
+                using (var stream = File.OpenRead(filePath))
+                {
+                    var bitmap = new BitmapImage();
+                    bitmap.BeginInit();
+                    bitmap.CacheOption = BitmapCacheOption.OnLoad;
+                    bitmap.DecodePixelWidth = maxWidth;
+                    bitmap.StreamSource = stream;
+                    bitmap.EndInit();
+                    bitmap.Freeze();
+
+                    source = bitmap;
+                }
+
+                // 🔥 Crop WITHOUT re-encoding
+                int maxHeight = (int)(source.PixelWidth * maxHeightRatio);
+
+                if (source.PixelHeight > maxHeight)
+                {
+                    int y = (source.PixelHeight - maxHeight) / 2;
+                    var cropped = new CroppedBitmap(
+                        source,
+                        new Int32Rect(0, y, source.PixelWidth, maxHeight));
+
+                    cropped.Freeze();
+                    return cropped;
+                }
+
+                return source;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        public static bool ModImageExists(string modFolder)
+        {
+            string metaFolder = Path.Combine(
+                Directory.GetCurrentDirectory(),
+                "installed",
+                modFolder,
+                "META");
+
+            if (!Directory.Exists(metaFolder))
+                return false;
+
+            foreach (var ext in Extensions)
+            {
+                if (File.Exists(Path.Combine(metaFolder, "image" + ext)))
+                    return true;
+            }
+
+            return false;
+        }
+    }
+
+    public class TrayIcon : IDisposable
+    {
+        private const int WM_LBUTTONDBLCLK = 0x203;
+        private const int WM_RBUTTONDOWN = 0x204;
+        private const int WM_USER = 0x400;
+        private const int WM_TRAYICON = WM_USER + 1;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NOTIFYICONDATA
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public int uID;
+            public int uFlags;
+            public int uCallbackMessage;
+            public IntPtr hIcon;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string szTip;
+            public int dwState;
+            public int dwStateMask;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string szInfo;
+            public int uVersion;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string szInfoTitle;
+            public int dwInfoFlags;
+        }
+
+        [DllImport("shell32.dll")]
+        private static extern bool Shell_NotifyIcon(int dwMessage, ref NOTIFYICONDATA pnid);
+
+        [DllImport("user32.dll")]
+        private static extern bool DestroyIcon(IntPtr hIcon);
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr LoadImage(IntPtr hinst, string lpszName, uint uType, int cxDesired, int cyDesired, uint fuLoad);
+
+        private const uint IMAGE_ICON = 1;
+        private const uint LR_LOADFROMFILE = 0x00000010;
+        private const uint LR_DEFAULTSIZE = 0x00000040;
+
+        private const int NIM_ADD = 0x00000000;
+        private const int NIM_MODIFY = 0x00000001;
+        private const int NIM_DELETE = 0x00000002;
+        private const int NIF_MESSAGE = 0x00000001;
+        private const int NIF_ICON = 0x00000002;
+        private const int NIF_TIP = 0x00000004;
+
+        private NOTIFYICONDATA _notifyIconData;
+        private HwndSource _hwndSource;
+        private Action _onDoubleClick;
+        private Action _onRightClick;
+        private IntPtr _customIconHandle = IntPtr.Zero;
+
+        private IntPtr LoadCustomIcon(string iconPath)
+        {
+            if (!string.IsNullOrEmpty(iconPath))
+            {
+                // Try to load from full path first
+                if (System.IO.File.Exists(iconPath))
+                {
+                    _customIconHandle = LoadImage(IntPtr.Zero, iconPath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+                    if (_customIconHandle != IntPtr.Zero)
+                        return _customIconHandle;
+                }
+
+                // Try to load from exe directory
+                var exeDir = System.IO.Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
+                var fullPath = System.IO.Path.Combine(exeDir, iconPath);
+                if (System.IO.File.Exists(fullPath))
+                {
+                    _customIconHandle = LoadImage(IntPtr.Zero, fullPath, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
+                    if (_customIconHandle != IntPtr.Zero)
+                        return _customIconHandle;
+                }
+            }
+
+            return SystemIcons.Application.Handle;
+        }
+
+        public void ShowTrayIcon(string tooltip, Action onDoubleClick, Action onRightClick, string iconPath = null)
+        {
+            _onDoubleClick = onDoubleClick;
+            _onRightClick = onRightClick;
+
+            // Create a hidden window to receive messages
+            var hwndSourceParameters = new HwndSourceParameters()
+            {
+                Width = 0,
+                Height = 0,
+                WindowStyle = 0,
+                ParentWindow = IntPtr.Zero,
+                WindowName = "TrayIconWindow"
+            };
+
+            _hwndSource = new HwndSource(hwndSourceParameters);
+            _hwndSource.AddHook(WndProc);
+
+            // Load custom icon or use default
+            IntPtr iconHandle = LoadCustomIcon(iconPath);
+
+            // Create the tray icon
+            _notifyIconData = new NOTIFYICONDATA
+            {
+                cbSize = Marshal.SizeOf<NOTIFYICONDATA>(),
+                hWnd = _hwndSource.Handle,
+                uID = 1,
+                uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
+                uCallbackMessage = WM_TRAYICON,
+                hIcon = iconHandle,
+                szTip = tooltip
+            };
+
+            Shell_NotifyIcon(NIM_ADD, ref _notifyIconData);
+        }
+
+        private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+        {
+            if (msg == WM_TRAYICON)
+            {
+                switch (lParam.ToInt32())
+                {
+                    case WM_LBUTTONDBLCLK:
+                        _onDoubleClick?.Invoke();
+                        handled = true;
+                        break;
+                    case WM_RBUTTONDOWN:
+                        _onRightClick?.Invoke();
+                        handled = true;
+                        break;
+                }
+            }
+            return IntPtr.Zero;
+        }
+
+        public void Dispose()
+        {
+            if (_notifyIconData.hWnd != IntPtr.Zero)
+            {
+                Shell_NotifyIcon(NIM_DELETE, ref _notifyIconData);
+            }
+
+            // Clean up custom icon
+            if (_customIconHandle != IntPtr.Zero)
+            {
+                DestroyIcon(_customIconHandle);
+                _customIconHandle = IntPtr.Zero;
+            }
+
+            _hwndSource?.Dispose();
+        }
+    }
+}

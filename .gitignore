@@ -1,0 +1,31 @@
+# Build results
+bin/
+obj/
+game-data-overlay/target/
+Tools/game-data-overlay.exe
+
+# Visual Studio cache / IDE state
+.vs/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# Rider / VS Code (safe to include even if unused)
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+patch_changes/*.jsonl
+
+# Unused
+ModLoader/exploreros.xaml
+ModLoader/exploreros.xaml.cs
+ModLoader/RFModEntry.xaml
+ModLoader/RFModEntry.xaml.cs
+/ModLoader/Properties/PublishProfiles
+ModLoader/CSLolInterop.cs
+ModLoader/CSLolInterop.cs
+ModLoader/Loader.cs
